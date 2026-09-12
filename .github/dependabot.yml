@@ -5,12 +5,20 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    ignore:
+      # boringssl pins foreign-types 0.3.x and uses APIs removed in 0.4+.
+      - dependency-name: "foreign-types"
+        versions: [">=0.4"]
 
   # WebUI (Vue) dependencies; package.json and pnpm-lock.yaml live in /webui.
   - package-ecosystem: "npm"
     directory: "/webui"
     schedule:
       interval: "daily"
+    ignore:
+      # vue-tsc 3.x is incompatible with TypeScript 7 (Go-based tsc).
+      - dependency-name: "typescript"
+        versions: [">=7"]
 
   # GitHub Actions used by the CI workflows.
   - package-ecosystem: "github-actions"
