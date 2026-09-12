@@ -14,6 +14,11 @@ on:
     branches: [ "master" ]
   workflow_dispatch:
 
+# Cancel superseded runs on the same ref instead of queueing them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-boringssl:
     runs-on: ubuntu-latest
@@ -22,7 +27,7 @@ jobs:
     steps:
     - name: Clone BoringSSL
       run: |
-        git clone https://boringssl.googlesource.com/boringssl
+        git clone --depth 1 https://boringssl.googlesource.com/boringssl
 
     - name: Cache BoringSSL build
       uses: actions/cache@v6
@@ -132,14 +137,13 @@ jobs:
         target: aarch64-linux-android
 
     - name: Cache Cargo registry and build artifacts
-      uses: actions/cache@v6
+      uses: Swatinem/rust-cache@v2
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
+        # No Cargo.lock is committed, so key on the workspace manifests;
+        # the matrix job id is part of rust-cache's key automatically.
+        prefix-key: omk-rust
+        key: ${{ hashFiles('**/Cargo.toml') }}
+        cache-on-failure: true
 
     - name: Install Android SDK
       uses: android-actions/setup-android@v4
