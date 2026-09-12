@@ -25,9 +25,9 @@ const ACCENT_PROPERTIES = [
   '--m-color-inverse-primary',
 ] as const
 
-// The WebUI no longer offers appearance settings: the theme always follows the
-// system color scheme and the default Monet-driven palette is applied.
-const FALLBACK_ACCENT: Record<ResolvedMode, AccentPalette> = {
+// The WebUI follows the system light/dark mode with a fixed palette; there is
+// no Monet dynamic-color sampling and no appearance settings.
+const PALETTES: Record<ResolvedMode, AccentPalette> = {
   light: {
     primary: '#3482ff',
     onPrimary: '#ffffff',
@@ -70,32 +70,22 @@ export class AppearanceController {
     const root = document.documentElement
     const resolved: ResolvedMode = this.#systemTheme.matches ? 'dark' : 'light'
     setThemeMode('system')
-    root.dataset.themeMode = 'auto'
-    root.dataset.themeResolved = resolved
-    root.dataset.themeAccent = 'default'
-    root.dataset.monet = 'true'
-    root.dataset.barBlur = 'false'
-    root.dataset.floatingBottomBar = 'false'
-    root.dataset.liquidGlass = 'false'
-    root.dataset.paletteStyle = 'TonalSpot'
-    root.dataset.colorSpec = 'SPEC_2025'
-    root.style.setProperty('--omk-ui-scale', '1')
     root.style.colorScheme = resolved
 
-    const fallback = FALLBACK_ACCENT[resolved]
+    const palette = PALETTES[resolved]
     const values: Record<(typeof ACCENT_PROPERTIES)[number], string> = {
-      '--m-color-primary': `var(--primary, ${fallback.primary})`,
-      '--m-color-on-primary': `var(--onPrimary, ${fallback.onPrimary})`,
-      '--m-color-primary-container': `var(--primaryContainer, ${fallback.primaryContainer})`,
-      '--m-color-on-primary-container': `var(--onPrimaryContainer, ${fallback.onPrimaryContainer})`,
-      '--m-color-secondary': `var(--secondary, ${fallback.primary})`,
-      '--m-color-on-secondary': `var(--onSecondary, ${fallback.onPrimary})`,
-      '--m-color-secondary-container': `var(--secondaryContainer, ${fallback.primaryContainer})`,
-      '--m-color-on-secondary-container': `var(--onSecondaryContainer, ${fallback.onPrimaryContainer})`,
-      '--m-color-tertiary-container': `var(--tertiaryContainer, ${fallback.primaryContainer})`,
-      '--m-color-on-tertiary-container': `var(--onTertiaryContainer, ${fallback.onPrimaryContainer})`,
-      '--m-color-tertiary-container-variant': `var(--tertiaryContainer, ${fallback.primaryContainer})`,
-      '--m-color-inverse-primary': `var(--inversePrimary, ${fallback.primary})`,
+      '--m-color-primary': palette.primary,
+      '--m-color-on-primary': palette.onPrimary,
+      '--m-color-primary-container': palette.primaryContainer,
+      '--m-color-on-primary-container': palette.onPrimaryContainer,
+      '--m-color-secondary': palette.primary,
+      '--m-color-on-secondary': palette.onPrimary,
+      '--m-color-secondary-container': palette.primaryContainer,
+      '--m-color-on-secondary-container': palette.onPrimaryContainer,
+      '--m-color-tertiary-container': palette.primaryContainer,
+      '--m-color-on-tertiary-container': palette.onPrimaryContainer,
+      '--m-color-tertiary-container-variant': palette.primaryContainer,
+      '--m-color-inverse-primary': palette.primary,
     }
     for (const [property, value] of Object.entries(values)) root.style.setProperty(property, value)
   }
