@@ -1,4 +1,4 @@
-import { exec } from 'kernelsu-alt'
+import { spawn } from 'kernelsu-alt'
 import { MAX_KEYBOX_XML_BYTES } from '../cli'
 import { i18n } from '../i18n'
 
@@ -33,6 +33,22 @@ function shellQuote(value: string): string {
 function commandError(errno: number, stderr: string): Error {
   const detail = stderr.trim().replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, MAX_ERROR_LENGTH)
   return new Error(detail || `storage command exited with code ${errno}`)
+}
+
+// Run a script with /system/bin/sh as an argument vector; the script itself is
+// never interpolated into a shell command string.
+function runShellScript(script: string): Promise<{ errno: number, stdout: string, stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    const process = spawn('/system/bin/sh', ['-c', script])
+    process.stdout.on('data', (chunk: string) => { stdout += chunk })
+    process.stderr.on('data', (chunk: string) => { stderr += chunk })
+    process.on('exit', (code: number | null) => {
+      resolve({ errno: code ?? 1, stdout, stderr })
+    })
+    process.on('error', (error: Error) => { reject(error) })
+  })
 }
 
 function isSafeEntryName(name: string): boolean {
@@ -122,7 +138,7 @@ function shellExtensionPattern(extension: string): string {
   }).join('')
 }
 
-function buildListCommand(path: string, extension: string): string {
+function buildListScript(path: string, extension: string): string {
   const extensionPattern = shellExtensionPattern(extension)
   const script = [
     `root=${shellQuote(STORAGE_ROOT)}`,
@@ -164,10 +180,10 @@ function buildListCommand(path: string, extension: string): string {
     String.raw`if [ "$count" -gt ${MAX_LIST_ENTRIES} ]; then printf 'x\000'; else printf 'z\000'; fi`,
   ].join('\n')
   const command = `command -v base64 >/dev/null 2>&1 && command -v tr >/dev/null 2>&1 || exit 127\n{\n${script}\n} | base64 | tr -d '\\r\\n'`
-  return `/system/bin/sh -c ${shellQuote(command)}`
+  return command
 }
 
-function buildReadCommand(path: string, maxBytes: number): string {
+function buildReadScript(path: string, maxBytes: number): string {
   const script = [
     `root=${shellQuote(STORAGE_ROOT)}`,
     `target=${shellQuote(path)}`,
@@ -201,7 +217,7 @@ function buildReadCommand(path: string, maxBytes: number): string {
     'limit_plus_one=$((limit + 1))',
     'head -c "$limit_plus_one" "$resolved" | base64 | tr -d \'\\r\\n\'',
   ].join('\n')
-  return `/system/bin/sh -c ${shellQuote(script)}`
+  return script
 }
 
 async function readBrowserFile(file: File, extension: string, maxBytes: number): Promise<SelectedFile> {
@@ -435,7 +451,7 @@ export class FileSelector {
     this.#entries = []
     this.#emit()
     try {
-      const result = await exec(buildListCommand(path, this.#extension))
+      const result = await runShellScript(buildListScript(path, this.#extension))
       if (this.#pending?.token !== token || request !== this.#request) return false
       if (result.errno !== 0) throw commandError(result.errno, result.stderr)
       this.#entries = parseListing(result.stdout, this.#extension)
@@ -460,7 +476,7 @@ export class FileSelector {
     this.#status = i18n.t('replace_keybox_storage_loading')
     this.#emit()
     try {
-      const result = await exec(buildReadCommand(path, this.#maxBytes))
+      const result = await runShellScript(buildReadScript(path, this.#maxBytes))
       if (this.#pending?.token !== token || request !== this.#request) return
       if (result.errno !== 0) {
         if (result.errno === 3) throw new Error(i18n.t('prompt_keybox_too_large'))
