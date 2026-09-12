@@ -11,7 +11,7 @@ import {
   showSnackbar,
   setThemeMode,
 } from 'miuix-vue'
-import { All, Settings, Tune } from 'miuix-vue/icons'
+import { All, Tune } from 'miuix-vue/icons'
 import { AppList, type AppListSnapshot } from '../app_list/app_list'
 import { appearance } from '../appearance'
 import { Cli, type ActivityEntry, type KeyboxRevocationStatus } from '../cli'
@@ -22,8 +22,6 @@ import { i18n } from '../i18n'
 import { fetchLatestSecurityPatch } from '../security_patch'
 import { isDev } from '../utils/dev'
 import HomeView, { type KeyboxStatus, type ModuleStatus, type TeeStatus } from './HomeView.vue'
-import PifFingerprintDialog from './PifFingerprintDialog.vue'
-import SettingsView from './SettingsView.vue'
 import TargetsView from './TargetsView.vue'
 import ToolsView, { type ToolEvent } from './ToolsView.vue'
 import FileBrowserSheet from './FileBrowserSheet.vue'
@@ -46,7 +44,6 @@ const keyboxLevel = ref<'tee' | 'strongbox' | 'unknown'>('unknown')
 const keyboxRevocation = ref<KeyboxRevocationStatus>('not_checked')
 const teeStatus = ref<TeeStatus>('loading')
 const securityPatch = ref<string | null>(null)
-const spoofedDevice = ref<string | null | undefined>(undefined)
 const activities = ref<ActivityEntry[]>([])
 const activityStatus = ref<'loading' | 'ready' | 'error'>('loading')
 const activityClearBusy = ref(false)
@@ -57,18 +54,15 @@ const adbEnabled = ref(true)
 const adbDevOptions = ref(true)
 const adbUsbDebug = ref(true)
 const adbOemUnlock = ref(true)
-const pifOpen = ref(false)
 const keyboxOpen = ref(false)
 const selectedKeybox = ref<{ name: string, contents: Uint8Array } | null>(null)
 const keyboxBusy = ref(false)
 const targetsView = ref<InstanceType<typeof TargetsView> | null>(null)
-const pifDialog = ref<InstanceType<typeof PifFingerprintDialog> | null>(null)
 
-const pageIds = ['home', 'tools', 'settings'] as const
+const pageIds = ['home', 'tools'] as const
 const navItems = computed(() => [
   { label: i18n.t('nav_home') === 'nav_home' ? 'Home' : i18n.t('nav_home') },
   { label: i18n.t('nav_tools') === 'nav_tools' ? 'Tools' : i18n.t('nav_tools') },
-  { label: i18n.t('nav_settings') === 'nav_settings' ? 'Settings' : i18n.t('nav_settings') },
 ])
 
 let unsubscribeAppList: (() => void) | null = null
@@ -78,110 +72,6 @@ let keydownListener: ((event: KeyboardEvent) => void) | null = null
 let pageHistoryActive = false
 const overlayHistory = new Set<string>()
 let targetsRefreshTimer: number | null = null
-let navigationElement: HTMLElement | null = null
-let navigationPointerId: number | null = null
-let navigationPointerStartX = 0
-let navigationPointerStartIndex = 0
-let navigationPointerSlotWidth = 1
-let navigationWasDragged = false
-let navigationSuppressClick = false
-
-function liquidNavigationEnabled(): boolean {
-  const root = document.documentElement
-  return root.dataset.floatingBottomBar === 'true' && root.dataset.liquidGlass === 'true'
-}
-
-function clampNavigationIndex(index: number): number {
-  return Math.max(0, Math.min(pageIds.length - 1, index))
-}
-
-function navigationPosition(clientX: number): number {
-  if (!navigationElement) return pageIndex.value
-  const bounds = navigationElement.getBoundingClientRect()
-  const slot = Math.max(1, (bounds.width - 8) / pageIds.length)
-  return clampNavigationIndex((clientX - bounds.left - 4) / slot)
-}
-
-function onNavigationPointerDown(event: PointerEvent): void {
-  if (!navigationElement || !liquidNavigationEnabled() || !event.isPrimary || event.button !== 0
-      || navigationPointerId !== null) return
-  const bounds = navigationElement.getBoundingClientRect()
-  navigationPointerSlotWidth = Math.max(
-    1,
-    (bounds.width - 8) / pageIds.length,
-  )
-  navigationPointerId = event.pointerId
-  navigationPointerStartX = event.clientX
-  navigationPointerStartIndex = Math.floor(navigationPosition(event.clientX))
-  navigationWasDragged = false
-  navigationElement.classList.add('is-pressing')
-  navigationElement.style.setProperty('--omk-liquid-nav-index', String(navigationPointerStartIndex))
-  navigationElement.style.setProperty('--omk-liquid-nav-scale', '1.392857')
-  navigationElement.style.setProperty('--omk-liquid-nav-panel-offset', '0px')
-  navigationElement.style.setProperty(
-    '--omk-liquid-nav-highlight-x',
-    `${event.clientX - bounds.left}px`,
-  )
-  try { navigationElement.setPointerCapture(event.pointerId) } catch { /* WebView may reject capture. */ }
-  event.preventDefault()
-}
-
-function onNavigationPointerMove(event: PointerEvent): void {
-  if (!navigationElement || navigationPointerId !== event.pointerId) return
-  if (Math.abs(event.clientX - navigationPointerStartX) > 1) {
-    navigationElement.classList.add('is-dragging')
-    navigationWasDragged = true
-  }
-  const position = navigationPointerStartIndex
-    + (event.clientX - navigationPointerStartX) / navigationPointerSlotWidth
-  navigationElement.style.setProperty('--omk-liquid-nav-index', String(clampNavigationIndex(position)))
-  const bounds = navigationElement.getBoundingClientRect()
-  const distance = event.clientX - navigationPointerStartX
-  const fraction = Math.min(1, Math.abs(distance) / Math.max(1, bounds.width))
-  const rubberBand = Math.sign(distance) * 4 * (1 - (1 - fraction) ** 2)
-  navigationElement.style.setProperty('--omk-liquid-nav-panel-offset', `${rubberBand}px`)
-  navigationElement.style.setProperty(
-    '--omk-liquid-nav-highlight-x',
-    `${event.clientX - bounds.left}px`,
-  )
-  event.preventDefault()
-}
-
-function onNavigationPointerUp(event: PointerEvent): void {
-  if (!navigationElement || navigationPointerId !== event.pointerId) return
-  const target = Math.round(navigationPosition(event.clientX))
-  navigationSuppressClick = navigationWasDragged
-  navigationPointerId = null
-  navigationWasDragged = false
-  navigationElement.classList.remove('is-pressing', 'is-dragging')
-  navigationElement.style.setProperty('--omk-liquid-nav-scale', '1')
-  navigationElement.style.setProperty('--omk-liquid-nav-panel-offset', '0px')
-  navigationElement.style.setProperty('--omk-liquid-nav-highlight-x', '50%')
-  navigationElement.style.setProperty('--omk-liquid-nav-index', String(target))
-  try { navigationElement.releasePointerCapture(event.pointerId) } catch { /* Already released. */ }
-  if (target !== pageIndex.value) setPage(target)
-  window.setTimeout(() => { navigationSuppressClick = false }, 120)
-  event.preventDefault()
-}
-
-function onNavigationClickCapture(event: Event): void {
-  if (!navigationSuppressClick) return
-  navigationSuppressClick = false
-  event.preventDefault()
-  event.stopImmediatePropagation()
-}
-
-function onNavigationPointerCancel(event: PointerEvent): void {
-  if (!navigationElement || navigationPointerId !== event.pointerId) return
-  navigationPointerId = null
-  navigationWasDragged = false
-  navigationSuppressClick = false
-  navigationElement.classList.remove('is-pressing', 'is-dragging')
-  navigationElement.style.setProperty('--omk-liquid-nav-scale', '1')
-  navigationElement.style.setProperty('--omk-liquid-nav-panel-offset', '0px')
-  navigationElement.style.setProperty('--omk-liquid-nav-highlight-x', '50%')
-  navigationElement.style.setProperty('--omk-liquid-nav-index', String(pageIndex.value))
-}
 
 function notify(message: string, error = false): void {
   void showSnackbar({ message, duration: error ? 6000 : 'long', withDismissAction: true })
@@ -302,15 +192,13 @@ async function refreshIdentity(force = false): Promise<void> {
     keyboxRevocation.value = 'not_listed'
     teeStatus.value = 'normal'
     securityPatch.value = '2026-08-01'
-    spoofedDevice.value = 'Google Pixel 9 Pro'
     return
   }
   try {
-    const [keybox, patch, tee, pif] = await Promise.allSettled([
+    const [keybox, patch, tee] = await Promise.allSettled([
       cli.getKeyboxState(),
       cli.getSystemSecurityPatch(),
       cli.getTeeStatus(),
-      cli.getPifFingerprintState(),
     ])
     if (keybox.status === 'fulfilled') {
       const value = keybox.value
@@ -326,11 +214,6 @@ async function refreshIdentity(force = false): Promise<void> {
     if (patch.status === 'fulfilled') securityPatch.value = patch.value
     if (tee.status === 'fulfilled') teeStatus.value = 'normal'
     else teeStatus.value = 'error'
-    if (pif.status === 'fulfilled') {
-      spoofedDevice.value = pif.value.enabled
-        ? (/^google\s/i.test(pif.value.model) ? pif.value.model : `Google ${pif.value.model}`)
-        : null
-    }
   } catch (error) {
     console.error('Unable to load OMK identity:', error)
   }
@@ -432,7 +315,6 @@ function onTool(event: ToolEvent): void {
     case 'syncSecurityPatch': void syncPatch(false); break
     case 'restoreSecurityPatch': void syncPatch(true); break
     case 'openAdbDisabler': void openAdbDisabler(); break
-    case 'spoofPif': pifOpen.value = true; break
   }
 }
 
@@ -474,18 +356,9 @@ async function clearActivities(): Promise<void> {
 
 onMounted(async () => {
   const applyMiuixTheme = (): void => {
-    const mode = appearance.mode === 'auto' ? 'system' : appearance.mode === 'amoled' ? 'dark' : appearance.mode
-    setThemeMode(mode)
+    setThemeMode('system')
   }
   applyMiuixTheme()
-  navigationElement = document.querySelector<HTMLElement>('.main-navigation')
-  navigationElement?.style.setProperty('--omk-liquid-nav-index', String(pageIndex.value))
-  navigationElement?.style.setProperty('--omk-liquid-nav-scale', '1')
-  navigationElement?.addEventListener('pointerdown', onNavigationPointerDown)
-  navigationElement?.addEventListener('pointermove', onNavigationPointerMove)
-  navigationElement?.addEventListener('pointerup', onNavigationPointerUp)
-  navigationElement?.addEventListener('pointercancel', onNavigationPointerCancel)
-  navigationElement?.addEventListener('click', onNavigationClickCapture, true)
   unsubscribeAppearance = appearance.onChange(applyMiuixTheme)
   keydownListener = event => {
     if (event.key === 'Escape') {
@@ -516,33 +389,12 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', refreshTargetsWhenForegrounded)
   window.removeEventListener('focus', refreshTargetsWhenForegrounded)
   if (keydownListener !== null) window.removeEventListener('keydown', keydownListener)
-  navigationElement?.removeEventListener('pointerdown', onNavigationPointerDown)
-  navigationElement?.removeEventListener('pointermove', onNavigationPointerMove)
-  navigationElement?.removeEventListener('pointerup', onNavigationPointerUp)
-  navigationElement?.removeEventListener('pointercancel', onNavigationPointerCancel)
-  navigationElement?.removeEventListener('click', onNavigationClickCapture, true)
-  navigationElement = null
   unsubscribeAppList?.()
   unsubscribeFileSelector?.()
   unsubscribeAppearance?.()
   history.destroy()
 })
 
-watch(pageIndex, index => {
-  if (navigationPointerId === null) {
-    navigationElement?.style.setProperty('--omk-liquid-nav-index', String(index))
-  }
-})
-
-watch(pifOpen, open => {
-  if (open && !overlayHistory.has('pif-fingerprint')) {
-    overlayHistory.add('pif-fingerprint')
-    history.push('pif-fingerprint', () => {
-      overlayHistory.delete('pif-fingerprint')
-      pifDialog.value?.requestClose()
-    })
-  } else if (!open && overlayHistory.delete('pif-fingerprint')) history.consume('pif-fingerprint')
-})
 watch(adbOpen, open => {
   if (open && !overlayHistory.has('adb-disabler')) {
     overlayHistory.add('adb-disabler')
@@ -568,7 +420,6 @@ watch(keyboxOpen, open => {
         :keybox-revocation="keyboxRevocation"
         :tee-status="teeStatus"
         :security-patch="securityPatch"
-        :spoofed-device="spoofedDevice"
         :activities="activities"
         :activity-status="activityStatus"
         :activity-clear-busy="activityClearBusy"
@@ -583,9 +434,7 @@ watch(keyboxOpen, open => {
         @sync-security-patch="onTool('syncSecurityPatch')"
         @restore-security-patch="onTool('restoreSecurityPatch')"
         @open-adb-disabler="onTool('openAdbDisabler')"
-        @spoof-pif="onTool('spoofPif')"
       />
-      <SettingsView v-show="pageIndex === 2" />
     </main>
 
     <MiuixNavigationBar
@@ -597,7 +446,7 @@ watch(keyboxOpen, open => {
       @update:model-value="setPage"
     >
       <template #icon="{ index }">
-        <MiuixIcon :icon="index === 0 ? All : index === 1 ? Tune : Settings" :size="24" />
+        <MiuixIcon :icon="index === 0 ? All : Tune" :size="24" />
       </template>
     </MiuixNavigationBar>
 
@@ -680,13 +529,6 @@ watch(keyboxOpen, open => {
       </template>
     </MiuixDialog>
 
-    <PifFingerprintDialog
-      ref="pifDialog"
-      v-model="pifOpen"
-      :cli="cli"
-      @notify="notify"
-      @changed="refreshIdentity(true); refreshActivity()"
-    />
     <MiuixSnackbarHost />
   </div>
 </template>

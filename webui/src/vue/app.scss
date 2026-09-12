@@ -1,5 +1,5 @@
 // Component anatomy, typography, interaction and motion come from miuix-vue.
-// These overrides connect the existing appearance preferences and page layout.
+// These overrides connect the page layout and identity cards.
 :root {
   --m-color-primary: #3482ff;
   --m-color-on-primary: #fff;
@@ -27,31 +27,12 @@
   --omk-left-inset: var(--window-inset-left, env(safe-area-inset-left, 0px));
   --omk-right-inset: var(--window-inset-right, env(safe-area-inset-right, 0px));
   --omk-nav-height: 64px;
-  --omk-bar-background: rgb(247 247 247 / 82%);
-  --omk-glass-background: rgb(255 255 255 / 54%);
   --omk-identity-mix: 42%;
   --omk-activity-mix: 24%;
   --omk-preference-mix: 24%;
   --omk-ui-scale: 1;
 }
 
-/* Palette families mirror KernelSU's selectable Monet styles.  They tune the
- * tonal amount applied to cards while keeping the MIUIX surface tokens intact. */
-:root[data-palette-style='Neutral'] { --omk-identity-mix: 22%; --omk-activity-mix: 14%; --omk-preference-mix: 14%; }
-:root[data-palette-style='Vibrant'] { --omk-identity-mix: 58%; --omk-activity-mix: 34%; --omk-preference-mix: 34%; }
-:root[data-palette-style='Expressive'] { --omk-identity-mix: 50%; --omk-activity-mix: 30%; --omk-preference-mix: 30%; }
-:root[data-palette-style='Rainbow'],
-:root[data-palette-style='FruitSalad'] { --omk-identity-mix: 46%; --omk-activity-mix: 28%; --omk-preference-mix: 28%; }
-
-:root.m-theme-dark {
-  --omk-bar-background: rgb(0 0 0 / 78%);
-  --omk-glass-background: rgb(36 36 36 / 58%);
-}
-
-/* app.scss is injected after miuix-vue's stylesheet.  Keep the surface
- * tokens in sync with the library's light/dark class; otherwise a fallback
- * declared on :root can win the cascade and leave cards/popups white while
- * the rest of the page is dark. */
 :root.m-theme-light {
   --m-color-background: #fff;
   --m-color-on-background: #000;
@@ -82,16 +63,6 @@
   --m-color-on-surface-variant-actions: rgb(255 255 255 / 40%);
   --m-color-divider-line: #393939;
   --m-color-window-dimming: rgb(0 0 0 / 60%);
-}
-
-:root[data-theme-mode='amoled'] {
-  --m-color-background: #000;
-  --m-color-on-background: rgb(255 255 255 / 90%);
-  --m-color-surface: #000;
-  --m-color-surface-variant: #101010;
-  --m-color-surface-container: #101010;
-  --m-color-surface-container-high: #171717;
-  --m-color-surface-container-highest: #202020;
 }
 
 * { box-sizing: border-box; }
@@ -184,8 +155,7 @@ button { touch-action: manipulation; }
     calc(var(--omk-nav-height) + var(--omk-bottom-inset) + 12px) var(--omk-left-inset);
 }
 .page-host { min-height: calc(100vh - var(--omk-nav-height)); }
-.app-page, .settings-view { width: min(100%, 720px); margin: 0 auto; }
-.app-page { padding: 0 12px 16px; }
+.app-page { width: min(100%, 720px); margin: 0 auto; padding: 0 12px 16px; }
 .m-top-app-bar { position: sticky; top: var(--omk-top-inset); z-index: 10; background: var(--m-color-surface); }
 .m-basic-component__title { font-size: 16px; line-height: 1.3; }
 .m-basic-component__summary { font-size: 14px; line-height: 1.35; }
@@ -268,27 +238,6 @@ button { touch-action: manipulation; }
     var(--m-color-surface-container)
   );
 }
-
-/* KernelSU falls back to its neutral light/dark surfaces when Monet is
- * disabled.  Keep a previously selected custom seed from tinting every card
- * after the user turns the dynamic palette off. */
-:root[data-monet='false'] .identity-card > .m-card,
-:root[data-monet='false'] .activity-card > .m-card,
-:root[data-monet='false'] .preference-card > .m-card,
-:root[data-monet='false'] .settings-card .m-card {
-  background: var(--m-color-surface-container) !important;
-}
-
-:root[data-monet='false'] .settings-card .m-card {
-  border-color: transparent;
-  box-shadow: none;
-}
-
-:root[data-monet='false'][data-floating-bottom-bar='true']
-  .main-navigation .m-navigation-bar__item--selected {
-  background: var(--m-color-surface-container-high);
-  color: var(--m-color-on-surface);
-}
 .preference-icon { display: inline-flex; width: 28px; align-items: center; justify-content: center; color: var(--m-color-primary); }
 .main-navigation {
   position: fixed;
@@ -304,162 +253,6 @@ button { touch-action: manipulation; }
 .main-navigation .m-navigation-bar__item { min-width: 0; }
 .main-navigation .m-navigation-bar__item--selected { color: var(--m-color-primary); }
 .main-navigation .m-navigation-bar__label { max-width: 100%; padding-inline: 4px; line-height: 1.25; }
-:root[data-bar-blur='true'] .m-top-app-bar,
-:root[data-bar-blur='true'] .main-navigation {
-  /* A translucent layer is required for backdrop-filter to reveal the page
-   * beneath it.  Keep an rgba fallback for older Android WebViews, then use
-   * the active MIUIX surface token so dark/AMOLED themes never turn white. */
-  background: var(--omk-bar-background);
-  background: color-mix(in srgb, var(--m-color-surface) 78%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.2);
-  backdrop-filter: blur(22px) saturate(1.2);
-}
-:root[data-floating-bottom-bar='true'] { --omk-nav-height: 92px; }
-:root[data-floating-bottom-bar='true'] .main-navigation {
-  left: 50%;
-  right: auto;
-  bottom: max(28px, calc(var(--omk-bottom-inset) + 8px));
-  width: 236px;
-  height: 64px;
-  padding: 4px;
-  transform: translateX(-50%);
-  border-radius: 32px;
-  background: var(--m-color-surface-container);
-  box-shadow: 0 0 10px rgb(0 0 0 / 10%);
-}
-:root[data-floating-bottom-bar='true'] .main-navigation .m-divider { display: none; }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item { height: 56px; border-radius: 28px; opacity: 1; }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__item--selected { background: var(--m-color-tertiary-container); color: var(--m-color-on-tertiary-container); }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__icon { margin-top: 4px; }
-:root[data-floating-bottom-bar='true'] .main-navigation .m-navigation-bar__label { font-size: 11px; margin-bottom: 4px; }
-:root[data-liquid-glass='true'] .main-navigation {
-  overflow: hidden;
-  background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface-container) 58%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
-}
-:root[data-liquid-glass='true'] .m-top-app-bar {
-  background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface) 58%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
-  box-shadow: inset 0 -1px 0 rgb(255 255 255 / 12%);
-}
-:root[data-liquid-glass='true'] .main-navigation .m-navigation-bar__item--selected {
-  /* Keep the selected pill tied to the active accent instead of the
-   * neutral glass tint.  The solid container fallback is used by older
-   * WebViews that do not implement color-mix(). */
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 18%, transparent);
-  color: var(--m-color-primary);
-}
-
-/* LiquidBottomTabs-inspired sliding lens for the Vue MIUIX navigation bar.
- * The indicator follows pointer drags through --omk-liquid-nav-index and
- * settles with a spring-like easing when a tab is released. */
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true'] .main-navigation {
-  --omk-liquid-nav-index: 0;
-  --omk-liquid-nav-scale: 1;
-  --omk-liquid-nav-highlight-x: 50%;
-  --omk-liquid-nav-panel-offset: 0px;
-  isolation: isolate;
-  overflow: hidden;
-  touch-action: none;
-  /* Keep a translucent host surface beneath the moving lens.  Without this
-   * layer backdrop-filter has no backdrop to sample and older WebViews paint
-   * the bar as a fully transparent strip. */
-  background: var(--omk-glass-background);
-  background: color-mix(in srgb, var(--m-color-surface-container) 58%, transparent);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
-  backdrop-filter: blur(22px) saturate(1.35);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 12%), 0 3px 16px rgb(0 0 0 / 16%);
-  transform: translate3d(calc(-50% + var(--omk-liquid-nav-panel-offset)), 0, 0);
-  transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: transform;
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation::before {
-  position: absolute;
-  z-index: 0;
-  top: 4px;
-  bottom: 4px;
-  left: 4px;
-  width: calc((100% - 8px) / 3);
-  border-radius: 28px;
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 16%, transparent);
-  background-image: radial-gradient(
-    circle 72px at var(--omk-liquid-nav-highlight-x) 50%,
-    rgb(255 255 255 / 18%),
-    transparent 72%
-  );
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-color-primary) 20%, transparent),
-    inset 0 0 10px rgb(0 0 0 / 8%), 0 4px 12px rgb(0 0 0 / 10%);
-  content: '';
-  pointer-events: none;
-  transform: translate3d(calc(var(--omk-liquid-nav-index) * 100%), 0, 0)
-    scale(var(--omk-liquid-nav-scale));
-  transform-origin: center;
-  transition: transform 380ms cubic-bezier(0.16, 1, 0.3, 1),
-    background-color 160ms linear, box-shadow 160ms linear;
-  will-change: transform;
-}
-
-:root[data-theme-resolved='dark'][data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation::before {
-  background: var(--m-color-primary-container);
-  background: color-mix(in srgb, var(--m-color-primary) 24%, transparent);
-  background-image: radial-gradient(
-    circle 72px at var(--omk-liquid-nav-highlight-x) 50%,
-    rgb(255 255 255 / 14%),
-    transparent 72%
-  );
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--m-color-primary) 30%, transparent),
-    0 4px 14px rgb(0 0 0 / 22%);
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation .m-navigation-bar__row {
-  position: relative;
-  z-index: 1;
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation .m-navigation-bar__item {
-  position: relative;
-  z-index: 1;
-  background: transparent;
-  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), opacity 120ms linear;
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation.is-pressing .m-navigation-bar__item--selected {
-  transform: scale(1.08);
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation.is-pressing::before {
-  box-shadow: inset 0 0 8px rgb(0 0 0 / 15%),
-    inset 0 0 0 1px rgb(255 255 255 / 18%),
-    -1px 0 0 rgb(0 174 255 / 10%), 1px 0 0 rgb(255 74 116 / 10%),
-    0 4px 14px rgb(0 0 0 / 14%);
-}
-
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation.is-dragging,
-:root[data-floating-bottom-bar='true'][data-liquid-glass='true']
-  .main-navigation.is-dragging::before {
-  transition: none;
-}
-:root.m-theme-dark[data-liquid-glass='true'] .main-navigation .m-navigation-bar__item--selected {
-  /* The shared ::before lens paints the selected state.  Keep the button
-   * itself transparent so the lens can slide freely between tabs in dark
-   * mode as well. */
-  background: transparent;
-}
 
 .confirm-sheet { display: grid; gap: 18px; padding-top: 4px; }
 .confirm-sheet p { margin: 0; overflow-wrap: anywhere; color: var(--m-color-on-surface-variant-summary); line-height: 1.45; }
