@@ -33,7 +33,7 @@ jobs:
 
     - name: Install Rust toolchain
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@v2
       with:
         toolchain: nightly
         target: aarch64-linux-android
@@ -126,7 +126,7 @@ jobs:
         fi
 
     - name: Install Rust toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@v2
       with:
         toolchain: nightly
         target: aarch64-linux-android
