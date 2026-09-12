@@ -30,7 +30,6 @@ const props = defineProps<{
   keyboxRevocation: KeyboxRevocationStatus
   teeStatus: TeeStatus
   securityPatch: string | null
-  spoofedDevice: string | null | undefined
   activities: ActivityEntry[]
   activityStatus: ActivityStatus
   activityClearBusy: boolean
@@ -151,31 +150,6 @@ function describeActivity(entry: ActivityEntry): { title: string, detail: string
           'Default security patch restored. Please reboot the device.',
         ),
       }
-    case 'pif_enabled': {
-      let model = entry.detail
-      let securityPatch = ''
-      try {
-        const detail = JSON.parse(entry.detail) as { model?: unknown, securityPatch?: unknown }
-        if (typeof detail.model === 'string') model = detail.model
-        if (typeof detail.securityPatch === 'string') securityPatch = detail.securityPatch
-      } catch {
-        // Plain-text records created outside the current WebUI remain readable.
-      }
-      return {
-        title: tr('menu_spoof_pif_fingerprint', 'Spoof PIF fingerprint'),
-        detail: tr(
-          'prompt_pif_applied',
-          'PIF fingerprint applied: %s, security patch %s.',
-          model,
-          securityPatch,
-        ),
-      }
-    }
-    case 'pif_disabled':
-      return {
-        title: tr('menu_spoof_pif_fingerprint', 'Spoof PIF fingerprint'),
-        detail: tr('prompt_pif_disabled', 'PIF fingerprint spoofing disabled.'),
-      }
     case 'adb_disabler_changed':
       return {
         title: tr('tools_adb_disabler', 'ADB Disabler'),
@@ -252,10 +226,6 @@ async function copyActivity(entry: ActivityEntry): Promise<void> {
         <div class="identity-field">
           <span>{{ tr('home_tee_status', 'TEE status') }}</span>
           <strong :data-tone="teeState.tone">{{ teeState.label }}</strong>
-        </div>
-        <div class="identity-field">
-          <span>{{ tr('home_spoofed_device', 'Spoofed device fingerprint') }}</span>
-          <strong>{{ spoofedDevice === null ? tr('pif_disabled', 'Disabled') : (spoofedDevice ?? '\u2014') }}</strong>
         </div>
       </MiuixCard>
     </div>

@@ -7,7 +7,7 @@ import {
   MiuixSmallTitle,
   MiuixTopAppBar,
 } from 'miuix-vue'
-import { AddCircle, Lock, Replace, Reset, Tune, Update } from 'miuix-vue/icons'
+import { AddCircle, Lock, Replace, Reset, Update } from 'miuix-vue/icons'
 import { i18n } from '../i18n'
 
 export type ToolEvent =
@@ -16,7 +16,6 @@ export type ToolEvent =
   | 'syncSecurityPatch'
   | 'restoreSecurityPatch'
   | 'openAdbDisabler'
-  | 'spoofPif'
 
 type BusyPatch = 'sync' | 'restore' | null
 
@@ -31,7 +30,6 @@ const emit = defineEmits<{
   syncSecurityPatch: []
   restoreSecurityPatch: []
   openAdbDisabler: []
-  spoofPif: []
 }>()
 
 function runTool(event: ToolEvent): void {
@@ -41,7 +39,6 @@ function runTool(event: ToolEvent): void {
     case 'syncSecurityPatch': emit('syncSecurityPatch'); break
     case 'restoreSecurityPatch': emit('restoreSecurityPatch'); break
     case 'openAdbDisabler': emit('openAdbDisabler'); break
-    case 'spoofPif': emit('spoofPif'); break
   }
 }
 
@@ -76,15 +73,6 @@ const groups = [
         summary: tr('tools_adb_disabler_desc', 'Disable developer options, USB debugging and OEM unlock at boot.'),
       },
     ],
-  },
-  {
-    title: tr('tools_fingerprint_spoofing', 'Fingerprint spoofing'),
-    items: [{
-      event: 'spoofPif' as const,
-      icon: Tune,
-      title: tr('menu_spoof_pif_fingerprint', 'Spoof PIF fingerprint'),
-      summary: tr('tools_pif_desc', 'Fetch and apply a Pixel fingerprint for Play Integrity.'),
-    }],
   },
   {
     title: tr('tools_security_patch', 'Set security patch'),

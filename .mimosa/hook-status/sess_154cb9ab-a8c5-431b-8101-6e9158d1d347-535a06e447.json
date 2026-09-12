@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-09-12T16:37:01.034Z",
+  "sessionId": "sess_154cb9ab-a8c5-431b-8101-6e9158d1d347",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "C:/Users/Administrator/.zcode/workspace/default/OhMyKeymint/docs/FAQ.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 7,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}
