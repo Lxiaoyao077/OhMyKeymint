@@ -1,6 +1,19 @@
 version: 2
 updates:
+  # Rust crates for the keymint/injector helpers.
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "daily"
+
+  # WebUI (Vue) dependencies; package.json and pnpm-lock.yaml live in /webui.
+  - package-ecosystem: "npm"
+    directory: "/webui"
+    schedule:
+      interval: "daily"
+
+  # GitHub Actions used by the CI workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
