@@ -36,3 +36,4 @@ cert.der
 /.cargo/config.toml
 
 __pycache__/
+.mimosa/

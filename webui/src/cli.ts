@@ -1,4 +1,4 @@
-import { exec, spawn } from 'kernelsu-alt'
+import { spawn } from 'kernelsu-alt'
 import { normalizePackageNames } from './package_name'
 import {
   ANDROID_SECURITY_BULLETIN_MIRROR_URL,
@@ -163,8 +163,26 @@ function encodeBase64Utf8(value: string): string {
   return encodeBase64Bytes(new TextEncoder().encode(value))
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
+interface ProcessResult {
+  errno: number
+  stdout: string
+  stderr: string
+}
+
+// Run a binary directly with its argument vector instead of interpolating a
+// shell command string.
+function runProcess(binary: string, args: string[]): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    const process = spawn(binary, args)
+    process.stdout.on('data', (chunk: string) => { stdout += chunk })
+    process.stderr.on('data', (chunk: string) => { stderr += chunk })
+    process.on('exit', (code: number | null) => {
+      resolve({ errno: code ?? 1, stdout, stderr })
+    })
+    process.on('error', (error: Error) => { reject(error) })
+  })
 }
 
 function normalizeAbiToken(value: string): SupportedAbi | null {
@@ -297,11 +315,9 @@ export class Cli {
   }
 
   async getSystemSecurityPatch(): Promise<string> {
-    let probe: Awaited<ReturnType<typeof exec>>
+    let probe: ProcessResult
     try {
-      probe = await exec(
-        `/system/bin/sh -c ${shellQuote('/system/bin/getprop ro.build.version.security_patch')}`,
-      )
+      probe = await runProcess('/system/bin/getprop', ['ro.build.version.security_patch'])
     } catch (error) {
       throw new Error(`Unable to read the system security patch: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -387,36 +403,50 @@ export class Cli {
   }
 
   async #detectHelperPaths(): Promise<HelperPaths> {
-    let abiProbe: Awaited<ReturnType<typeof exec>>
+    let abiProbe: ProcessResult
     try {
-      abiProbe = await exec(
-        `/system/bin/sh -c ${shellQuote('/system/bin/getprop ro.product.cpu.abilist; /system/bin/getprop ro.product.cpu.abi; /system/bin/uname -m 2>/dev/null || :')}`,
-      )
+      // Each probe runs without a shell; the uname fallback is allowed to
+      // fail just like the original `2>/dev/null || :` chain.
+      const [abilist, abi, machine] = await Promise.all([
+        runProcess('/system/bin/getprop', ['ro.product.cpu.abilist']),
+        runProcess('/system/bin/getprop', ['ro.product.cpu.abi']),
+        runProcess('/system/bin/uname', ['-m']).catch(() => ({ errno: 1, stdout: '', stderr: '' })),
+      ])
+      if (abilist.errno !== 0 && abi.errno !== 0) {
+        throw new Error(abilist.stderr.trim() || `getprop exited with code ${abilist.errno}`)
+      }
+      abiProbe = {
+        errno: 0,
+        stdout: [abilist.stdout, abi.stdout, machine.stdout].join('\n'),
+        stderr: '',
+      }
     } catch (error) {
       throw new Error(`Unable to detect the Android ABI: ${error instanceof Error ? error.message : String(error)}`)
     }
-    if (abiProbe.errno !== 0) {
-      throw new Error(
-        `Unable to detect the Android ABI: ${abiProbe.stderr.trim() || `shell exited with code ${abiProbe.errno}`}`,
-      )
-    }
 
-    const abi = parseSupportedAbi(abiProbe.stdout)
-    if (abi === null) {
+    const abiName = parseSupportedAbi(abiProbe.stdout)
+    if (abiName === null) {
       throw new Error('Unsupported Android ABI: OMK provides arm64-v8a and x86_64 binaries')
     }
 
-    const roots = [HOT_UPDATE_ROOT, `${MODULE_ROOT}/libs/${abi}`]
+    const roots = [HOT_UPDATE_ROOT, `${MODULE_ROOT}/libs/${abiName}`]
     for (const root of roots) {
       const inject = `${root}/inject`
       const keymint = `${root}/keymint`
-      const check = await exec(
-        `/system/bin/sh -c ${shellQuote(`[ -x ${shellQuote(inject)} ] && [ -x ${shellQuote(keymint)} ]`)}`,
-      )
-      if (check.errno === 0) return { abi, inject, keymint }
+      try {
+        const [injectCheck, keymintCheck] = await Promise.all([
+          runProcess('/system/bin/test', ['-x', inject]),
+          runProcess('/system/bin/test', ['-x', keymint]),
+        ])
+        if (injectCheck.errno === 0 && keymintCheck.errno === 0) {
+          return { abi: abiName, inject, keymint }
+        }
+      } catch {
+        // A missing root companion on one root simply falls through to the next.
+      }
     }
 
-    throw new Error(`OMK ${abi} helper binaries are not installed`)
+    throw new Error(`OMK ${abiName} helper binaries are not installed`)
   }
 
   #run(binary: string, args: string[], maxOutputBytes = Number.POSITIVE_INFINITY): Promise<string> {
