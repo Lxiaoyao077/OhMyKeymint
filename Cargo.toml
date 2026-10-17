@@ -48,7 +48,7 @@ ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
 soter-common = { path = "soter-common" }
 android_logger = "0.15.1"
 multi_log = "0.1.2"
-zip = { version = "8.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [profile.dev]
 incremental = true
