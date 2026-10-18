@@ -123,7 +123,8 @@ other day keeps Google's published date. When the saved system and vendor
 dates differ, the system date determines this behavior. The helper updates the
 four `[trust]` patch-level fields and also sets
 `ro.build.version.security_patch` and `ro.vendor.build.security_patch` to that
-date with `resetprop`. Before the first sync, it saves both current property
+date with `resetprop -n`, bypassing the property service and its change actions.
+Before the first sync, it saves both current property
 values in
 `/data/misc/keystore/omk/data/security_patch_defaults.toml`; repeated syncs keep
 the existing defaults snapshot. While that snapshot remains valid and all four
@@ -145,6 +146,9 @@ are global runtime state for the current boot, so other processes can observe
 their synchronized or restored values. After a successful synchronization or
 restore, the WebUI shows a completion message and asks you to reboot the device;
 it does not reboot automatically.
+
+**Spoof PIF fingerprint** is the other network-backed action. PIF uses only the
+documented Pixel profile feed described below.
 
 A network, HTTP, or parsing failure occurs before anything is changed. Snapshot
 validation or creation failures also leave the properties and configuration
@@ -292,6 +296,66 @@ A successful WebUI save follows the injector hot-reload path and needs no
 keymint restart. Close and reopen the selected app when you need a clean
 routing boundary.
 
+### What does Spoof PIF fingerprint change?
+
+It stores a validated Pixel profile at
+`/data/misc/keystore/omk/data/pif_fingerprint.json`. The selected profile is
+downloaded through OMK's native HTTPS client, validated, and expanded into
+matching Android Build fields. OMK's own Zygisk payload reads that profile
+when the target process starts through the Zygisk Next loader. Zygisk Next must
+be installed and active by the user; OMK does not bundle, install, or implement
+that loader.
+
+OMK applies these fields while starting `com.google.android.gms.unstable`,
+including its named `:...` child processes. During
+pre-app specialization, native spoofing first attempts validated process-private
+property areas, warming up bionic's lazy mappings before inspection. If this
+cannot be installed safely, the payload restores replaced mappings and uses
+its available PLT hooks and validated AArch64 callback hook. The callback path
+checks wrapper semantics, memory mappings, and BTI/MTE permissions before
+patching libc. After specialization the payload updates Java `Build` fields.
+Build and native property spoofing have independent WebUI switches, both on
+by default, and are saved with Apply. The selected profile's initial API level
+is preserved, defaulting to `32` when absent. The Build path writes it to
+`Build.VERSION.DEVICE_INITIAL_SDK_INT`, and the native path uses the same value
+for `ro.product.first_api_level`. The running `Build.VERSION.SDK_INT` is not
+changed, and other API-level properties are not broadly rewritten.
+
+The independent **Spoof Build (Play Store)** option defaults to off. When enabled,
+it changes all 12 profile string fields in `com.android.vending` and its named
+`:...` children: manufacturer, model, fingerprint, brand, product, device,
+release, build ID, incremental version, type, tags, and security patch. It does
+not change their launch SDK, running SDK, or native properties, even when either
+GMS option is enabled. This option does not require either GMS option to be
+enabled, and all three can be enabled together. Configurations without the
+option keep it disabled.
+The helper ends both
+process families after a successful change so a new
+process can read the file. This action does not change global system
+properties, OMK's attested device identity, or the security-patch
+synchronization setting.
+Installing or updating OMK's Zygisk payload, or enabling Zygisk Next for the
+first time, still requires a device reboot. Turning the WebUI switch off
+removes the profile and refreshes the same process families so their next
+instances return to the device's original values.
+
+The PIF fingerprint integration uses the live `bot` feed. It does not install
+the separate PlayIntegrityFix module or
+provide its provider/signature spoofing. Desktop browser previews use labelled
+sample data and do not apply settings to a phone. A saved profile or successful
+property hook does not establish a passing Play Integrity verdict.
+
+A general Play Integrity checker application is not one of the target
+processes. Its own `Build.FINGERPRINT` display can therefore remain the device
+value even when the Google Play services process receives the selected profile
+or the optional store Build spoofing is active. Check the `OhMyKeymint-PIF` log entries for the target process
+and hook status when diagnosing the integration; a payload or Zygisk Next change
+also requires a reboot before new app processes can load it.
+
+If you changed `vb_hash` from `"random"` back to `"auto"`, or changed `vb_key`
+the same way before an auto snapshot was saved, a full
+reboot is required. The automatic value cannot return until the next boot.
+
 ### What happens if I make a mistake in a configuration file?
 
 A TOML syntax error, an unknown injector field, or an unsupported configuration
@@ -383,6 +447,29 @@ encrypted app data unreadable, or force identity verification.
 
 Only reset it when you deliberately accept those consequences and have already
 made a private backup. Resetting all stored keys is not a general repair step.
+
+### Why do stored keys report `InvalidKeyBlob` or `ErrorCode(-33)`?
+
+A KeyBlob must be opened with the same encryption inputs used to create it.
+OMK binds the verified-boot public-key digest (`vb_key`), `device_locked`, and
+`verified_boot_state` into that derivation. Its root KEK seed and secure-deletion
+state also matter. A mismatch can produce a GCM `VerificationFailed` error
+wrapped as `InvalidKeyBlob` (`-33`); that error alone does not identify the cause.
+The attested `vb_hash` does not enter this KeyBlob Root of Trust binding.
+
+With `vb_key = "auto"`, OMK atomically saves its first resolved public digest
+in `/data/misc/keystore/omk/data/vbmeta_state.toml` and reuses it across restarts
+and OTA updates. No private key is stored there. Keep that file with the active
+`config.toml` and OMK data backups. Invalid snapshots and failed initial saves
+stop startup instead of silently generating a different boot key.
+
+An explicit 64-character hex value or `"random"` bypasses the auto snapshot
+without replacing it. Do not use `"random"` if keys must survive restarts.
+If a blob was created with another value, pinning today's value does not
+re-encrypt or recover it. Compare the `Resolved vbmeta trust` entries in logs
+from the affected starts and restore the matching original configuration or
+backup when available. Do not clear `data/*` or regenerate `[crypto]` secrets
+as an automatic repair; those operations can destroy other required inputs.
 
 ### Why did an app lose a key after I added it to or removed it from `scoop`?
 
