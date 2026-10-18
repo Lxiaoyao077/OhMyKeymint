@@ -90,7 +90,7 @@ jobs:
       attestations: write
     strategy:
       matrix:
-        build-type: [debug, release]
+        build-type: [release]
     
     steps:
     - name: Checkout repository
