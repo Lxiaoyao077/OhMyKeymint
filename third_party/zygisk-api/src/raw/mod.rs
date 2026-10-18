@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, ptr::NonNull};
 
-use jni::JNIEnv;
+use jni::EnvUnowned;
 use libc::c_long;
 
 use crate::{ZygiskModule, impl_sealing::Sealed};
@@ -21,7 +21,7 @@ where
     #[doc(hidden)]
     pub api_table: ApiTableRef<'a, Version>,
     #[doc(hidden)]
-    pub jni_env: JNIEnv<'a>,
+    pub jni_env: EnvUnowned<'a>,
 }
 
 #[doc(hidden)]

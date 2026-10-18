@@ -196,7 +196,7 @@ pub(crate) fn install(api: &mut ZygiskApi<'_, V4>) -> Result<(), String> {
 
 /// No Zygisk API is used here. Binder state is initialized only after Android
 /// has assigned the app's UID, SELinux context and file-descriptor state.
-pub(crate) fn activate(env: &jni::JNIEnv<'_>) {
+pub(crate) fn activate(env: &jni::Env<'_>) {
     let Some(Ok((ndk, binder))) = INSTALL.get() else {
         return;
     };

@@ -1,6 +1,6 @@
 use core::ptr::NonNull;
 
-use jni::{JNIEnv, sys::JNINativeMethod};
+use jni::{EnvUnowned, sys::JNINativeMethod};
 use libc::{c_char, c_int, c_long};
 
 use crate::{
@@ -25,8 +25,12 @@ pub(crate) mod transparent {
 pub struct ApiTable {
     pub(crate) base: BaseApi<V2>,
 
-    pub(crate) hook_jni_native_methods_fn:
-        for<'a> unsafe extern "C" fn(JNIEnv<'a>, *const c_char, NonNull<JNINativeMethod>, c_int),
+    pub(crate) hook_jni_native_methods_fn: for<'a> unsafe extern "C" fn(
+        EnvUnowned<'a>,
+        *const c_char,
+        NonNull<JNINativeMethod>,
+        c_int,
+    ),
     pub(crate) plt_hook_register_fn: unsafe extern "C" fn(
         *const c_char,
         *const c_char,
@@ -55,7 +59,7 @@ impl<'a> ZygiskRaw<'a> for V2 {
         ) {
             m.dispatch.pre_app_specialize(
                 ZygiskApi::<V2>(m.api_table),
-                unsafe { m.jni_env.unsafe_clone() },
+                unsafe { EnvUnowned::from_raw(m.jni_env.as_raw()) },
                 args,
             );
         }
@@ -66,7 +70,7 @@ impl<'a> ZygiskRaw<'a> for V2 {
         ) {
             m.dispatch.post_app_specialize(
                 ZygiskApi::<V2>(m.api_table),
-                unsafe { m.jni_env.unsafe_clone() },
+                unsafe { EnvUnowned::from_raw(m.jni_env.as_raw()) },
                 args,
             );
         }
@@ -77,7 +81,7 @@ impl<'a> ZygiskRaw<'a> for V2 {
         ) {
             m.dispatch.pre_server_specialize(
                 ZygiskApi::<V2>(m.api_table),
-                unsafe { m.jni_env.unsafe_clone() },
+                unsafe { EnvUnowned::from_raw(m.jni_env.as_raw()) },
                 args,
             );
         }
@@ -88,7 +92,7 @@ impl<'a> ZygiskRaw<'a> for V2 {
         ) {
             m.dispatch.post_server_specialize(
                 ZygiskApi::<V2>(m.api_table),
-                unsafe { m.jni_env.unsafe_clone() },
+                unsafe { EnvUnowned::from_raw(m.jni_env.as_raw()) },
                 args,
             );
         }

@@ -3,7 +3,7 @@
 extern crate std;
 
 use api::ZygiskApi;
-use jni::JNIEnv;
+use jni::EnvUnowned;
 use raw::ZygiskRaw;
 
 pub mod api;
@@ -26,7 +26,7 @@ pub trait ZygiskModule {
     type Api: for<'a> ZygiskRaw<'a>;
 
     /// This method gets called as soon as the Zygisk module gets loaded into the target process
-    fn on_load(&self, api: ZygiskApi<'_, Self::Api>, env: JNIEnv<'_>) {}
+    fn on_load(&self, api: ZygiskApi<'_, Self::Api>, env: EnvUnowned<'_>) {}
 
     /// This method gets called before the target process is specialized as an app process
     ///
@@ -40,7 +40,7 @@ pub trait ZygiskModule {
     fn pre_app_specialize<'a>(
         &self,
         api: ZygiskApi<'a, Self::Api>,
-        env: JNIEnv<'a>,
+        env: EnvUnowned<'a>,
         args: &'a mut <Self::Api as ZygiskRaw<'_>>::AppSpecializeArgs,
     ) {
     }
@@ -51,7 +51,7 @@ pub trait ZygiskModule {
     fn post_app_specialize<'a>(
         &self,
         api: ZygiskApi<'a, Self::Api>,
-        env: JNIEnv<'a>,
+        env: EnvUnowned<'a>,
         args: &'a <Self::Api as ZygiskRaw<'_>>::AppSpecializeArgs,
     ) {
     }
@@ -62,7 +62,7 @@ pub trait ZygiskModule {
     fn pre_server_specialize<'a>(
         &self,
         api: ZygiskApi<'a, Self::Api>,
-        env: JNIEnv<'a>,
+        env: EnvUnowned<'a>,
         args: &'a mut <Self::Api as ZygiskRaw<'_>>::ServerSpecializeArgs,
     ) {
     }
@@ -73,7 +73,7 @@ pub trait ZygiskModule {
     fn post_server_specialize<'a>(
         &self,
         api: ZygiskApi<'a, Self::Api>,
-        env: JNIEnv<'a>,
+        env: EnvUnowned<'a>,
         args: &'a <Self::Api as ZygiskRaw<'_>>::ServerSpecializeArgs,
     ) {
     }
@@ -153,9 +153,7 @@ macro_rules! register_module {
                         unsafe { &mut *RAW_MODULE.0.get() }.write($crate::raw::RawModule {
                             dispatch: unsafe { (&*INSTANCE.0.get()).assume_init_ref() },
                             api_table: ::core::clone::Clone::clone(&api_table),
-                            jni_env: unsafe {
-                                $crate::jni::JNIEnv::from_raw(env).unwrap_unchecked()
-                            },
+                            jni_env: unsafe { $crate::jni::EnvUnowned::from_raw(env) },
                         });
 
                         unsafe { &mut *MODULE_ABI.0.get() }.write(
@@ -177,7 +175,7 @@ macro_rules! register_module {
                         } {
                             unsafe { (&*INSTANCE.0.get()).assume_init_ref() }
                                 .on_load($crate::api::ZygiskApi(api_table), unsafe {
-                                    $crate::jni::JNIEnv::from_raw(env).unwrap_unchecked()
+                                    $crate::jni::EnvUnowned::from_raw(env)
                                 })
                         }
                     },

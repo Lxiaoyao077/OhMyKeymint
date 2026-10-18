@@ -7,7 +7,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use jni::{
-    JNIEnv, JavaVM,
+    Env, JavaVM, jni_sig, jni_str,
     objects::{JByteArray, JValue},
 };
 use num_bigint_dig::BigUint;
@@ -64,7 +64,7 @@ pub(crate) struct KeyPair {
 
 static VM: OnceLock<JavaVM> = OnceLock::new();
 
-pub(crate) fn initialize_vm(env: &JNIEnv<'_>) -> bool {
+pub(crate) fn initialize_vm(env: &Env<'_>) -> bool {
     match env.get_java_vm() {
         Ok(vm) => VM.set(vm).is_ok() || VM.get().is_some(),
         Err(_) => false,
@@ -73,49 +73,76 @@ pub(crate) fn initialize_vm(env: &JNIEnv<'_>) -> bool {
 
 /// Use Android's RSA provider, with no dependency on a platform libcrypto ABI.
 pub(crate) fn generate_keypair() -> Option<KeyPair> {
-    let mut env = VM.get()?.attach_current_thread().ok()?;
-    // Do not clear an exception belonging to the caller.
-    if env.exception_check().ok()? {
-        return None;
-    }
-    let result = env.with_local_frame(16, |env| -> jni::errors::Result<KeyPair> {
-        let algorithm = env.new_string("RSA")?;
-        let generator = env
-            .call_static_method(
-                "java/security/KeyPairGenerator",
-                "getInstance",
-                "(Ljava/lang/String;)Ljava/security/KeyPairGenerator;",
-                &[JValue::Object(algorithm.as_ref())],
-            )?
-            .l()?;
-        env.call_method(&generator, "initialize", "(I)V", &[JValue::Int(2048)])?;
-        let pair = env
-            .call_method(
-                &generator,
-                "generateKeyPair",
-                "()Ljava/security/KeyPair;",
-                &[],
-            )?
-            .l()?;
-        let public = env
-            .call_method(&pair, "getPublic", "()Ljava/security/PublicKey;", &[])?
-            .l()?;
-        let private = env
-            .call_method(&pair, "getPrivate", "()Ljava/security/PrivateKey;", &[])?
-            .l()?;
-        let public = JByteArray::from(env.call_method(public, "getEncoded", "()[B", &[])?.l()?);
-        let private = JByteArray::from(env.call_method(private, "getEncoded", "()[B", &[])?.l()?);
-        Ok(KeyPair {
-            public_der: env.convert_byte_array(public)?,
-            private_der: env.convert_byte_array(private)?,
+    // jni 0.22 hands the `Env` to a closure instead of returning an attach
+    // guard, so the whole body runs inside `attach_current_thread`.
+    VM.get()?
+        .attach_current_thread(|env| -> Result<Option<KeyPair>, jni::errors::Error> {
+            // Do not clear an exception belonging to the caller.
+            if env.exception_check() {
+                return Ok(None);
+            }
+            let result = env.with_local_frame(16, |env| -> jni::errors::Result<KeyPair> {
+                let algorithm = env.new_string("RSA")?;
+                let generator = env
+                    .call_static_method(
+                        jni_str!("java/security/KeyPairGenerator"),
+                        jni_str!("getInstance"),
+                        jni_sig!("(Ljava/lang/String;)Ljava/security/KeyPairGenerator;"),
+                        &[JValue::Object(algorithm.as_ref())],
+                    )?
+                    .l()?;
+                env.call_method(
+                    &generator,
+                    jni_str!("initialize"),
+                    jni_sig!("(I)V"),
+                    &[JValue::Int(2048)],
+                )?;
+                let pair = env
+                    .call_method(
+                        &generator,
+                        jni_str!("generateKeyPair"),
+                        jni_sig!("()Ljava/security/KeyPair;"),
+                        &[],
+                    )?
+                    .l()?;
+                let public = env
+                    .call_method(
+                        &pair,
+                        jni_str!("getPublic"),
+                        jni_sig!("()Ljava/security/PublicKey;"),
+                        &[],
+                    )?
+                    .l()?;
+                let private = env
+                    .call_method(
+                        &pair,
+                        jni_str!("getPrivate"),
+                        jni_sig!("()Ljava/security/PrivateKey;"),
+                        &[],
+                    )?
+                    .l()?;
+                let public_object = env
+                    .call_method(public, jni_str!("getEncoded"), jni_sig!("()[B"), &[])?
+                    .l()?;
+                let private_object = env
+                    .call_method(private, jni_str!("getEncoded"), jni_sig!("()[B"), &[])?
+                    .l()?;
+                let public_array = env.as_cast::<JByteArray>(&public_object)?;
+                let private_array = env.as_cast::<JByteArray>(&private_object)?;
+                Ok(KeyPair {
+                    public_der: env.convert_byte_array(&*public_array)?,
+                    private_der: env.convert_byte_array(&*private_array)?,
+                })
+            });
+            if env.exception_check() {
+                env.exception_clear();
+            }
+            Ok(result
+                .ok()
+                .filter(|key| !key.public_der.is_empty() && !key.private_der.is_empty()))
         })
-    });
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
-    }
-    result
         .ok()
-        .filter(|key| !key.public_der.is_empty() && !key.private_der.is_empty())
+        .flatten()
 }
 
 pub(crate) fn attk_private_der() -> Option<Vec<u8>> {

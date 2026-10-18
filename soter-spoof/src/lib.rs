@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use jni::{JNIEnv, objects::JString};
+use jni::{Env, EnvUnowned, objects::JString};
 use zygisk_api::{
     ZygiskModule,
     api::{
@@ -26,55 +26,81 @@ const MAX_PROFILE_BYTES: usize = 4 * 1024;
 #[derive(Default)]
 struct SoterSpoofModule;
 
+/// jni 0.22 splits `JNIEnv` into the FFI-safe `EnvUnowned` that native entry
+/// points receive and the `Env` that carries the actual API. Upgrade at the
+/// boundary; the closure runs in the caller's JNI frame, exactly where the old
+/// `JNIEnv` argument pointed.
+fn with_env<R>(env: &mut EnvUnowned<'_>, body: impl FnOnce(&mut Env<'_>) -> R) -> Option<R> {
+    match env
+        .with_env_no_catch(|env| -> Result<R, jni::errors::Error> { Ok(body(env)) })
+        .into_outcome()
+    {
+        jni::Outcome::Ok(value) => Some(value),
+        jni::Outcome::Err(error) => {
+            soter::log(&format!("Soter Beta JNI call failed: {error}"));
+            None
+        }
+        // Re-panic in the caller's frame so the module entry's catch_unwind
+        // still aborts instead of swallowing an inconsistent JNI state.
+        jni::Outcome::Panic(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 impl ZygiskModule for SoterSpoofModule {
     type Api = V4;
 
     fn pre_app_specialize<'a>(
         &self,
         mut api: ZygiskApi<'a, V4>,
-        mut env: JNIEnv<'a>,
+        mut env: EnvUnowned<'a>,
         args: &'a mut AppSpecializeArgs<'_>,
     ) {
-        let process = read_java_string(&mut env, args.nice_name);
-        let data_dir = read_java_string(&mut env, args.app_data_dir);
-        if is_soter_target(process.as_deref(), data_dir.as_deref()) {
-            soter::log("Soter Beta target selected: com.tencent.soter.soterserver");
-            match api.with_companion(read_soter_from_companion) {
-                Ok(Ok(true)) => {
-                    // Native Binder callbacks may outlive a partially installed
-                    // hook. Keep the payload mapped once installation is attempted.
-                    match soter::install(&mut api) {
-                        Ok(()) => soter::log("Soter Beta hook registered; awaiting specialization"),
-                        Err(error) => soter::log(&format!("Soter Beta hook unavailable: {error}")),
+        with_env(&mut env, |env| {
+            let process = read_java_string(env, args.nice_name);
+            let data_dir = read_java_string(env, args.app_data_dir);
+            if is_soter_target(process.as_deref(), data_dir.as_deref()) {
+                soter::log("Soter Beta target selected: com.tencent.soter.soterserver");
+                match api.with_companion(read_soter_from_companion) {
+                    Ok(Ok(true)) => {
+                        // Native Binder callbacks may outlive a partially installed
+                        // hook. Keep the payload mapped once installation is attempted.
+                        match soter::install(&mut api) {
+                            Ok(()) => {
+                                soter::log("Soter Beta hook registered; awaiting specialization")
+                            }
+                            Err(error) => {
+                                soter::log(&format!("Soter Beta hook unavailable: {error}"))
+                            }
+                        }
+                    }
+                    result => {
+                        if matches!(result, Ok(Ok(false))) {
+                            soter::log("Soter Beta is disabled");
+                        } else {
+                            soter::log(&format!("Soter Beta companion unavailable: {result:?}"));
+                        }
+                        api.set_option(ZygiskOption::DlCloseModuleLibrary);
                     }
                 }
-                result => {
-                    if matches!(result, Ok(Ok(false))) {
-                        soter::log("Soter Beta is disabled");
-                    } else {
-                        soter::log(&format!("Soter Beta companion unavailable: {result:?}"));
-                    }
-                    api.set_option(ZygiskOption::DlCloseModuleLibrary);
-                }
+                return;
             }
-            return;
-        }
-        api.set_option(ZygiskOption::DlCloseModuleLibrary);
+            api.set_option(ZygiskOption::DlCloseModuleLibrary);
+        });
     }
 
     fn post_app_specialize<'a>(
         &self,
         _api: ZygiskApi<'a, V4>,
-        env: JNIEnv<'a>,
+        mut env: EnvUnowned<'a>,
         _args: &'a AppSpecializeArgs<'a>,
     ) {
-        soter::activate(&env);
+        with_env(&mut env, |env| soter::activate(env));
     }
 
     fn pre_server_specialize<'a>(
         &self,
         mut api: ZygiskApi<'a, V4>,
-        _env: JNIEnv<'a>,
+        _env: EnvUnowned<'a>,
         _args: &'a mut ServerSpecializeArgs<'_>,
     ) {
         api.set_option(ZygiskOption::DlCloseModuleLibrary);
@@ -164,8 +190,8 @@ fn is_package_data_dir(path: &str, package: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
-fn read_java_string(env: &mut JNIEnv<'_>, value: &JString<'_>) -> Option<String> {
-    env.get_string(value).ok().map(Into::into)
+fn read_java_string(env: &mut Env<'_>, value: &JString<'_>) -> Option<String> {
+    value.mutf8_chars(env).ok().map(|chars| chars.to_string())
 }
 
 fn read_soter_from_companion(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<bool> {

@@ -9,5 +9,5 @@ edition = "2024"
 [dependencies]
 thiserror = { version = "2.0", default-features = false }
 libc = { version = "0.2", default-features = false }
-jni = { version = "0.21" }
+jni = { version = "0.22" }
 bitflags = { version = "2.9" }
