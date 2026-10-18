@@ -9,9 +9,11 @@ import {
   MiuixProgressIndicator,
   MiuixTopAppBar,
 } from 'miuix-vue'
-import { Copy, Delete, Info, Ok, Recent } from 'miuix-vue/icons'
+import { Copy, Delete, ExpandMore, Info, Ok, Recent } from 'miuix-vue/icons'
 import type {
   ActivityEntry,
+  DiagnosticsState,
+  KeyboxInspector,
   KeyboxLevel,
   KeyboxRevocationStatus,
   KeyboxSource,
@@ -28,19 +30,32 @@ const props = defineProps<{
   keyboxSource: KeyboxSource
   keyboxLevel: KeyboxLevel
   keyboxRevocation: KeyboxRevocationStatus
+  keyboxInspector: KeyboxInspector | null
+  diagnostics: DiagnosticsState | null
+  diagnosticsStatus: 'loading' | 'ready' | 'error'
   teeStatus: TeeStatus
   securityPatch: string | null
+  spoofedDevice: string | null | undefined
   activities: ActivityEntry[]
   activityStatus: ActivityStatus
   activityClearBusy: boolean
 }>()
 
 const emit = defineEmits<{
+  refreshDiagnostics: []
   clearActivities: []
 }>()
 
 const activitiesExpanded = ref(false)
 const copiedActivity = ref<number | null>(null)
+const expandedKeyboxChains = ref(new Set<string>())
+
+function toggleKeyboxChain(algorithm: string): void {
+  const expanded = new Set(expandedKeyboxChains.value)
+  if (expanded.has(algorithm)) expanded.delete(algorithm)
+  else expanded.add(algorithm)
+  expandedKeyboxChains.value = expanded
+}
 
 function tr(key: string, fallback: string, ...args: unknown[]): string {
   const value = i18n.t(key, ...args)
@@ -106,6 +121,68 @@ const teeState = computed(() => ({
   error: { label: tr('home_status_error', 'Needs attention'), tone: 'error' },
 })[props.teeStatus])
 
+const keyboxChains = computed(() => {
+  const inspector = props.keyboxInspector
+  if (!inspector) return []
+  return [inspector.rsa, inspector.ec].filter((chain): chain is NonNullable<typeof chain> => chain !== null)
+})
+
+const serviceRows = computed(() => {
+  if (!props.diagnostics) return []
+  return [
+    { id: 'keymint', label: tr('home_diag_keymint', 'OMK KeyMint'), value: props.diagnostics.keymint },
+    { id: 'keystore2', label: tr('home_diag_keystore2', 'keystore2'), value: props.diagnostics.keystore2 },
+    { id: 'injector', label: tr('home_diag_injector', 'Injector'), value: props.diagnostics.injector },
+  ]
+})
+
+const hardwareRows = computed(() => {
+  if (!props.diagnostics) return []
+  return [
+    { id: 'tee', label: 'TEE · KeyMint', value: props.diagnostics.tee },
+    { id: 'strongbox', label: 'StrongBox · KeyMint', value: props.diagnostics.strongbox },
+    { id: 'rkp-tee', label: 'TEE · RKP', value: props.diagnostics.rkp_tee },
+    { id: 'rkp-strongbox', label: 'StrongBox · RKP', value: props.diagnostics.rkp_strongbox },
+  ]
+})
+
+function diagnosticStatusLabel(status: string): string {
+  switch (status) {
+    case 'running': return tr('home_diag_running', 'Running')
+    case 'stopped': return tr('home_diag_stopped', 'Stopped')
+    case 'configured': return tr('home_diag_configured', 'Configured')
+    case 'disabled': return tr('home_diag_disabled', 'Disabled')
+    case 'available': return tr('home_diag_available', 'Available')
+    case 'unavailable': return tr('home_diag_unavailable', 'Not registered')
+    case 'error': return tr('home_diag_error', 'Probe failed')
+    default: return tr('home_diag_unknown', 'Unknown')
+  }
+}
+
+function diagnosticTone(status: string): string {
+  return status === 'error' ? 'error' : 'muted'
+}
+
+function certificateDate(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const parts = new Intl.DateTimeFormat(i18n.lang, {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date)
+  if (i18n.lang.startsWith('zh')) {
+    const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find(value => value.type === type)?.value ?? ''
+    return `${part('year')}年${date.getUTCMonth() + 1}月${part('day')}日 ${part('hour')}:${part('minute')}:${part('second')} UTC`
+  }
+  return `${parts.map(part => part.value).join('')} UTC`
+}
+
 const visibleActivities = computed(() => (
   activitiesExpanded.value ? props.activities : props.activities.slice(0, 4)
 ))
@@ -123,12 +200,10 @@ function describeActivity(entry: ActivityEntry): { title: string, detail: string
         detail: tr('prompt_keybox_replaced', 'Keybox was changed and will reload automatically.'),
       }
     case 'widevine_installed':
-    case 'pif_enabled':
-    case 'pif_disabled':
       return {
-        // Keep historical records readable after the retired actions were
-        // removed.  Do not expose the old feature names or suggest that they
-        // are still available in the current WebUI.
+        // Keep historical records readable after the retired action was
+        // removed.  Do not expose the old feature name or suggest that it is
+        // still available in the current WebUI.
         title: tr('home_legacy_key_provisioning', 'Legacy key provisioning'),
         detail: tr(
           'home_legacy_key_provisioning_detail',
@@ -151,6 +226,31 @@ function describeActivity(entry: ActivityEntry): { title: string, detail: string
           'prompt_security_patch_restored_default',
           'Default security patch restored. Please reboot the device.',
         ),
+      }
+    case 'pif_enabled': {
+      let model = entry.detail
+      let securityPatch = ''
+      try {
+        const detail = JSON.parse(entry.detail) as { model?: unknown, securityPatch?: unknown }
+        if (typeof detail.model === 'string') model = detail.model
+        if (typeof detail.securityPatch === 'string') securityPatch = detail.securityPatch
+      } catch {
+        // Plain-text records created outside the current WebUI remain readable.
+      }
+      return {
+        title: tr('menu_spoof_pif_fingerprint', 'Spoof PIF fingerprint'),
+        detail: tr(
+          'prompt_pif_applied',
+          'PIF fingerprint applied: %s, security patch %s.',
+          model,
+          securityPatch,
+        ),
+      }
+    }
+    case 'pif_disabled':
+      return {
+        title: tr('menu_spoof_pif_fingerprint', 'Spoof PIF fingerprint'),
+        detail: tr('prompt_pif_disabled', 'PIF fingerprint spoofing disabled.'),
       }
     case 'adb_disabler_changed':
       // Preserve existing history without restoring the retired tool.
@@ -230,8 +330,125 @@ async function copyActivity(entry: ActivityEntry): Promise<void> {
           <span>{{ tr('home_tee_status', 'TEE status') }}</span>
           <strong :data-tone="teeState.tone">{{ teeState.label }}</strong>
         </div>
+        <div class="identity-field">
+          <span>{{ tr('home_spoofed_device', 'Spoofed device fingerprint') }}</span>
+          <strong>{{ spoofedDevice === null ? tr('pif_disabled', 'Disabled') : (spoofedDevice ?? '\u2014') }}</strong>
+        </div>
       </MiuixCard>
     </div>
+
+    <MiuixCard class="diagnostics-card" press-feedback="none">
+      <header class="diagnostics-heading">
+        <div>
+          <h2>{{ tr('home_diagnostics_title', 'Device diagnostics') }}</h2>
+          <span>{{ tr('home_diagnostics_desc', 'Runtime services and installed Keybox details') }}</span>
+        </div>
+        <MiuixButton
+          type="default"
+          class="diagnostics-refresh"
+          :disabled="diagnosticsStatus === 'loading'"
+          @click="emit('refreshDiagnostics')"
+        >
+          <MiuixProgressIndicator v-if="diagnosticsStatus === 'loading'" type="circular" :size="16" />
+          {{ tr('tools_diagnostics_refresh', 'Refresh') }}
+        </MiuixButton>
+      </header>
+      <div v-if="diagnosticsStatus === 'loading'" class="diagnostics-empty" role="status">
+        <MiuixProgressIndicator type="circular" :size="22" :stroke-width="2" />
+        <span>{{ tr('home_status_loading', 'Checking') }}</span>
+      </div>
+      <div v-else-if="diagnosticsStatus === 'error'" class="diagnostics-empty" role="alert">
+        <MiuixIcon :icon="Info" :size="22" />
+        <span>{{ tr('home_diagnostics_error', 'Unable to load diagnostics') }}</span>
+      </div>
+      <dl v-else class="diagnostics-services">
+        <div v-for="row in serviceRows" :key="row.id" class="diagnostics-service">
+          <dt>{{ row.label }}</dt>
+          <dd :data-tone="diagnosticTone(row.value.status)">
+            {{ diagnosticStatusLabel(row.value.status) }}
+            <small v-if="row.value.pid !== null">PID {{ row.value.pid }}</small>
+          </dd>
+        </div>
+      </dl>
+
+      <dl v-if="diagnostics" class="diagnostics-services diagnostics-services--hardware">
+        <div v-for="row in hardwareRows" :key="row.id" class="diagnostics-service">
+          <dt>{{ row.label }}</dt>
+          <dd :data-tone="row.value.status === 'error' ? 'error' : 'muted'">
+            {{ diagnosticStatusLabel(row.value.status) }}
+            <small v-if="'name' in row.value && row.value.name">
+              {{ row.value.name }}<template v-if="row.value.version !== null"> · v{{ row.value.version }}</template>
+            </small>
+          </dd>
+        </div>
+      </dl>
+      <p class="diagnostics-muted diagnostics-note">{{ tr('tools_diagnostics_note', 'HAL and RKP checks query registered AIDL services. Availability does not verify hardware-backed attestation or remote provisioning.') }}</p>
+
+      <div class="keybox-inspector">
+        <h3>{{ tr('home_keybox_inspector', 'Keybox certificates') }}</h3>
+        <p v-if="!keyboxInspector" class="diagnostics-muted">
+          {{ tr('home_keybox_inspector_unavailable', 'Certificate details unavailable') }}
+        </p>
+        <p v-else-if="keyboxChains.length === 0" class="diagnostics-muted">
+          {{ tr('home_keybox_inspector_empty', 'No certificate chains found') }}
+        </p>
+        <div v-else class="keybox-chains">
+          <div v-for="chain in keyboxChains" :key="chain.algorithm" class="keybox-chain">
+            <MiuixBasicComponent
+              :title="chain.algorithm"
+              :summary="tr('home_keybox_chain_length', '%s certificates', chain.chain_length)"
+              clickable
+              :aria-expanded="expandedKeyboxChains.has(chain.algorithm)"
+              :aria-controls="`keybox-chain-details-${chain.algorithm}`"
+              @click="toggleKeyboxChain(chain.algorithm)"
+            >
+              <template #end>
+                <MiuixIcon
+                  class="keybox-chain__expand"
+                  :class="{ 'is-expanded': expandedKeyboxChains.has(chain.algorithm) }"
+                  :icon="ExpandMore"
+                  :size="22"
+                />
+              </template>
+            </MiuixBasicComponent>
+            <div
+              :id="`keybox-chain-details-${chain.algorithm}`"
+              class="keybox-chain__collapse"
+              :class="{ 'is-expanded': expandedKeyboxChains.has(chain.algorithm) }"
+              :aria-hidden="!expandedKeyboxChains.has(chain.algorithm)"
+            >
+              <div class="keybox-certificates">
+                <article
+                  v-for="(certificate, index) in [...chain.certificates].reverse()"
+                  :key="`${chain.algorithm}-${certificate.serial}-${index}`"
+                  class="keybox-certificate"
+                >
+                  <h4>{{ tr('home_keybox_certificate_number', 'Certificate %s', index + 1) }}</h4>
+                  <dl class="keybox-certificate__details">
+                    <div>
+                      <dt>{{ tr('home_keybox_subject', 'Subject') }}</dt>
+                      <dd>{{ certificate.subject }}</dd>
+                    </div>
+                    <div>
+                      <dt>{{ tr('home_keybox_valid_from', 'Not before') }}</dt>
+                      <dd>{{ certificateDate(certificate.valid_from) }}</dd>
+                    </div>
+                    <div>
+                      <dt>{{ tr('home_keybox_valid_until', 'Not after') }}</dt>
+                      <dd>{{ certificateDate(certificate.valid_until) }}</dd>
+                    </div>
+                    <div>
+                      <dt>{{ tr('home_keybox_serial', 'Serial number') }}</dt>
+                      <dd>{{ certificate.serial }}</dd>
+                    </div>
+                  </dl>
+                </article>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </MiuixCard>
 
     <MiuixCard class="activity-card" press-feedback="none">
       <header class="activity-heading">

@@ -32,11 +32,12 @@ pub mod keymaster;
 pub mod keymint;
 pub mod logging;
 pub mod macros;
+pub mod pif_spoof;
 pub mod plat;
 pub mod proto;
 pub mod security_patch;
-pub mod soter_beta;
 pub mod selinux;
+pub mod soter_beta;
 pub mod utils;
 pub mod watchdog;
 pub mod webui_activity;
@@ -291,6 +292,240 @@ struct WebUiKeyboxState {
     revocation: &'static str,
 }
 
+#[derive(Serialize)]
+struct WebUiKeyboxChainInspector {
+    algorithm: &'static str,
+    chain_length: usize,
+    serials: Vec<String>,
+    leaf_subject: String,
+    leaf_issuer: String,
+    valid_from: String,
+    valid_until: String,
+    certificates: Vec<WebUiKeyboxCertificateInspector>,
+}
+
+#[derive(Serialize)]
+struct WebUiKeyboxCertificateInspector {
+    serial: String,
+    subject: String,
+    issuer: String,
+    valid_from: String,
+    valid_until: String,
+}
+
+#[derive(Serialize)]
+struct WebUiKeyboxInspector {
+    valid: bool,
+    bundled: bool,
+    rsa: Option<WebUiKeyboxChainInspector>,
+    ec: Option<WebUiKeyboxChainInspector>,
+}
+
+#[derive(Serialize)]
+struct WebUiServiceDiagnostic {
+    status: &'static str,
+    pid: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct WebUiDiagnostics {
+    keymint: WebUiServiceDiagnostic,
+    keystore2: WebUiServiceDiagnostic,
+    injector: WebUiServiceDiagnostic,
+    tee: WebUiHardwareDiagnostic,
+    strongbox: WebUiHardwareDiagnostic,
+    rkp_tee: WebUiServiceDiagnostic,
+    rkp_strongbox: WebUiServiceDiagnostic,
+    selinux: &'static str,
+}
+
+#[derive(Serialize)]
+struct WebUiHardwareDiagnostic {
+    status: &'static str,
+    version: Option<i32>,
+    name: Option<String>,
+}
+
+fn keybox_chain_inspector(chain: keybox::KeyboxChainInspector) -> WebUiKeyboxChainInspector {
+    WebUiKeyboxChainInspector {
+        algorithm: chain.algorithm,
+        chain_length: chain.chain_length,
+        serials: chain.serials,
+        leaf_subject: chain.leaf_subject,
+        leaf_issuer: chain.leaf_issuer,
+        valid_from: chain.valid_from,
+        valid_until: chain.valid_until,
+        certificates: chain
+            .certificates
+            .into_iter()
+            .map(|certificate| WebUiKeyboxCertificateInspector {
+                serial: certificate.serial,
+                subject: certificate.subject,
+                issuer: certificate.issuer,
+                valid_from: certificate.valid_from,
+                valid_until: certificate.valid_until,
+            })
+            .collect(),
+    }
+}
+
+fn webui_keybox_inspector() -> Result<String, String> {
+    let (state, inspector) =
+        keybox::installed_keybox_inspector().map_err(|error| format!("{error:#}"))?;
+    let response = WebUiKeyboxInspector {
+        valid: !matches!(state, keybox::KeyboxFileState::Invalid),
+        bundled: matches!(state, keybox::KeyboxFileState::Bundled),
+        rsa: inspector.rsa.map(keybox_chain_inspector),
+        ec: inspector.ec.map(keybox_chain_inspector),
+    };
+    serde_json::to_string(&response)
+        .map_err(|error| format!("failed to serialize keybox inspector: {error}"))
+}
+
+fn process_pid(names: &[&str], expected_executable: Option<&Path>) -> Option<u32> {
+    let current_pid = std::process::id();
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        if pid == current_pid {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let executable = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
+        let Ok(executable) = std::str::from_utf8(executable) else {
+            continue;
+        };
+        let Some(executable) = std::path::Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        if names.contains(&executable) {
+            if let Some(expected) = expected_executable {
+                if std::fs::read_link(entry.path().join("exe")).ok().as_deref() != Some(expected) {
+                    continue;
+                }
+            }
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn pidfile_process(path: &str, marker: &str) -> Option<u32> {
+    let pid = std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    if pid == std::process::id() {
+        return None;
+    }
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let cmdline = String::from_utf8_lossy(&cmdline);
+    cmdline.contains(marker).then_some(pid)
+}
+
+fn service_diagnostic(status: &'static str, pid: Option<u32>) -> WebUiServiceDiagnostic {
+    WebUiServiceDiagnostic { status, pid }
+}
+
+fn hardware_diagnostic(
+    level: android::hardware::security::keymint::SecurityLevel::SecurityLevel,
+) -> WebUiHardwareDiagnostic {
+    match plat::keymint_profile::diagnose_system_keymint(level) {
+        Ok(Some(info)) => WebUiHardwareDiagnostic {
+            status: "available",
+            version: Some(info.versionNumber),
+            name: Some(info.keyMintName),
+        },
+        Ok(None) => WebUiHardwareDiagnostic {
+            status: "unavailable",
+            version: None,
+            name: None,
+        },
+        Err(_) => WebUiHardwareDiagnostic {
+            status: "error",
+            version: None,
+            name: None,
+        },
+    }
+}
+
+fn rkp_diagnostic(instance: &str) -> WebUiServiceDiagnostic {
+    const DESCRIPTOR: &str = "android.hardware.security.keymint.IRemotelyProvisionedComponent";
+    let status = match rsbinder::hub::try_get_service(&format!("{DESCRIPTOR}/{instance}")) {
+        Ok(Some(binder)) if binder.descriptor() == DESCRIPTOR => {
+            if binder.ping_binder().is_ok() {
+                "available"
+            } else {
+                "error"
+            }
+        }
+        Ok(None) => "unavailable",
+        _ => "error",
+    };
+    service_diagnostic(status, None)
+}
+
+fn selinux_diagnostic() -> &'static str {
+    match std::fs::read_to_string("/sys/fs/selinux/enforce") {
+        Ok(value) if value.trim() == "1" => "enforcing",
+        Ok(value) if value.trim() == "0" => "permissive",
+        _ => "unknown",
+    }
+}
+
+fn webui_diagnostics() -> String {
+    use android::hardware::security::keymint::SecurityLevel::SecurityLevel;
+    // A vendor KeyMint process does not prove that OMK itself is running.
+    let executable = std::env::current_exe().ok();
+    let keymint_pid = executable
+        .as_deref()
+        .and_then(|path| process_pid(&["keymint"], Some(path)));
+    let keystore_pid = process_pid(&["keystore2"], None);
+    let injector_pid = pidfile_process("/data/adb/omk/injector-daemon.pid", "daemon-injector")
+        .or_else(|| process_pid(&["inject"], None));
+    serde_json::to_string(&WebUiDiagnostics {
+        keymint: service_diagnostic(
+            if keymint_pid.is_some() {
+                "running"
+            } else {
+                "stopped"
+            },
+            keymint_pid,
+        ),
+        keystore2: service_diagnostic(
+            if keystore_pid.is_some() {
+                "running"
+            } else {
+                "stopped"
+            },
+            keystore_pid,
+        ),
+        injector: service_diagnostic(
+            if injector_pid.is_some() {
+                "running"
+            } else {
+                "stopped"
+            },
+            injector_pid,
+        ),
+        tee: hardware_diagnostic(SecurityLevel::TRUSTED_ENVIRONMENT),
+        strongbox: hardware_diagnostic(SecurityLevel::STRONGBOX),
+        rkp_tee: rkp_diagnostic("default"),
+        rkp_strongbox: rkp_diagnostic("strongbox"),
+        selinux: selinux_diagnostic(),
+    })
+    .unwrap_or_else(|_| "{}".to_string())
+}
+
 fn webui_keybox_state() -> Result<String, String> {
     let (state, metadata, _) =
         keybox::installed_keybox_state_and_metadata().map_err(|error| format!("{error:#}"))?;
@@ -364,6 +599,139 @@ fn handle_webui_keybox_command() -> Option<Result<String, String>> {
                 ));
             }
             Some(webui_keybox_revocation_status())
+        }
+        _ => None,
+    }
+}
+
+fn handle_webui_pif_command() -> Option<Result<String, String>> {
+    let mut args = std::env::args();
+    let _program = args.next();
+    let command = args.next()?;
+
+    match command.as_str() {
+        "--webui-get-pif-fingerprint-state" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-pif-fingerprint-state does not accept arguments".to_string(),
+                ));
+            }
+            prepare_android_storage();
+            Some(pif_spoof::fingerprint_state().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-list-pif-devices" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-list-pif-devices does not accept arguments".to_string()
+                ));
+            }
+            Some(pif_spoof::list_devices().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-apply-pif-fingerprint" => {
+            let product = match args.next() {
+                Some(product) => product,
+                None => {
+                    return Some(Err(
+                        "--webui-apply-pif-fingerprint requires a product".to_string()
+                    ))
+                }
+            };
+            let options: Vec<String> = args.collect();
+            let (spoof_build, spoof_props, spoof_vending_build) = match options.as_slice() {
+                [] => (true, true, false),
+                [build, props]
+                    if matches!(build.as_str(), "0" | "1")
+                        && matches!(props.as_str(), "0" | "1") =>
+                {
+                    (build == "1", props == "1", false)
+                }
+                [build, props, vending]
+                    if matches!(build.as_str(), "0" | "1")
+                        && matches!(props.as_str(), "0" | "1")
+                        && matches!(vending.as_str(), "0" | "1") =>
+                {
+                    (build == "1", props == "1", vending == "1")
+                }
+                _ => {
+                    return Some(Err(
+                        "--webui-apply-pif-fingerprint accepts a product, optional spoofBuild spoofProps flags, and an optional spoofVendingBuild flag (0 or 1)".to_string(),
+                    ));
+                }
+            };
+            prepare_android_storage();
+            Some(
+                pif_spoof::apply_fingerprint(
+                    &product,
+                    spoof_build,
+                    spoof_props,
+                    spoof_vending_build,
+                )
+                .map_err(|error| format!("{error:#}")),
+            )
+        }
+        "--webui-disable-pif-fingerprint" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-disable-pif-fingerprint does not accept arguments".to_string(),
+                ));
+            }
+            prepare_android_storage();
+            Some(pif_spoof::disable_fingerprint().map_err(|error| format!("{error:#}")))
+        }
+        _ => None,
+    }
+}
+
+fn handle_webui_diagnostics_command() -> Option<Result<String, String>> {
+    let mut args = std::env::args();
+    let _program = args.next();
+    match args.next()?.as_str() {
+        "--webui-get-diagnostics" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-diagnostics does not accept arguments".to_string()
+                ));
+            }
+            Some(Ok(webui_diagnostics()))
+        }
+        "--webui-get-keybox-inspector" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-keybox-inspector does not accept arguments".to_string(),
+                ));
+            }
+            Some(webui_keybox_inspector())
+        }
+        _ => None,
+    }
+}
+
+fn handle_webui_app_patch_command(
+    mut args: impl Iterator<Item = String>,
+) -> Option<Result<String, String>> {
+    match args.next()?.as_str() {
+        "--webui-get-app-patch-levels" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-app-patch-levels does not accept arguments".to_string(),
+                ));
+            }
+            Some(config::app_patch_levels_json().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-set-app-patch-levels-base64" => {
+            let Some(payload) = args.next() else {
+                return Some(Err(
+                    "--webui-set-app-patch-levels-base64 requires one payload".to_string(),
+                ));
+            };
+            if payload.len() > 4096 || args.next().is_some() {
+                return Some(Err("invalid app patch-level payload arguments".to_string()));
+            }
+            Some(
+                config::save_app_patch_levels_base64(&payload)
+                    .map(|()| "app_patch_levels_saved".to_string())
+                    .map_err(|error| format!("{error:#}")),
+            )
         }
         _ => None,
     }
@@ -531,7 +899,36 @@ fn handle_webui_activity_command() -> Option<Result<String, String>> {
 }
 
 fn main() {
+    // WebUI diagnostics query the registered Binder services before entering
+    // the long-running KeyMint server path. Initialize the Binder process
+    // state first so standalone WebUI bridge invocations can safely perform
+    // those read-only queries.
+    let _ = rsbinder::ProcessState::init_default();
+    if let Some(result) = handle_webui_diagnostics_command()
+        .or_else(|| handle_webui_app_patch_command(std::env::args().skip(1)))
+    {
+        match result {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     if let Some(result) = handle_webui_soter_beta_command(std::env::args().skip(1)) {
+        match result {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    if let Some(result) = handle_webui_pif_command() {
         match result {
             Ok(output) => println!("{output}"),
             Err(error) => {
@@ -617,7 +1014,7 @@ fn run() -> Result<()> {
     // cannot inherit and retain the flock file description.
     let security_patch_lock = security_patch::acquire_operation_lock()
         .context("failed to lock security-patch operations during startup")?;
-    let mut config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
+    let config_file = config::bootstrap_config_file().context("failed to bootstrap config")?;
     let level = config_file
         .main
         .log_level
@@ -635,8 +1032,8 @@ fn run() -> Result<()> {
     info!("initial process state");
     let _ = rsbinder::ProcessState::init_default();
 
-    let resolved_trust =
-        plat::vbmeta::bootstrap_vbmeta(&mut config_file).context("failed to bootstrap vbmeta")?;
+    let resolved_trust = plat::vbmeta::bootstrap_vbmeta(&config_file, &security_patch_lock)
+        .context("failed to bootstrap vbmeta")?;
     prepare_android_storage();
     config::install_runtime_config(config_file, resolved_trust)
         .context("failed to install runtime config")?;
