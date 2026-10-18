@@ -16,7 +16,7 @@ on:
 
 jobs:
   build-boringssl:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     steps:
@@ -82,7 +82,7 @@ jobs:
         retention-days: 3
 
   setup-and-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - build-boringssl
     permissions:
@@ -173,11 +173,6 @@ jobs:
         [patch.crates-io]
         bssl-sys = { path = "$GITHUB_WORKSPACE/boringssl/rust/bssl-sys" }
         EOF
-
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install toml
 
     - name: Build OhMyKeymint
       id: prepareArtifact
