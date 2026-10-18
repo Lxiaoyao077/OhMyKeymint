@@ -19,7 +19,7 @@ fn read_framework() -> Result<u32> {
     let mut archive = zip::ZipArchive::new(File::open("/system/framework/framework.jar")?)?;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
-        let name = file.name();
+        let name = file.name()?;
         if !(name == "classes.dex"
             || name
                 .strip_prefix("classes")
