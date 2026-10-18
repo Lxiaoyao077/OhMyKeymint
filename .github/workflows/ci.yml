@@ -29,7 +29,7 @@ jobs:
       id: boringssl-cache
       with:
         path: boringssl/build
-        key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
+        key: boringssl-ubuntu-26.04-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
 
     - name: Install Rust toolchain
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
