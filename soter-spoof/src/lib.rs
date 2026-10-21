@@ -12,8 +12,9 @@ use std::{
 };
 
 use jni::{
-    JNIEnv,
+    Env, EnvUnowned, jni_sig, jni_str,
     objects::{JObject, JString, JValue},
+    strings::JNIString,
 };
 use pif_common::{BuildClass, MAX_PROFILE_BYTES, PifProfile};
 use zygisk_api::{
@@ -119,16 +120,33 @@ struct PifSpoofModule {
     profile: Mutex<Option<(PifProfile, PifTarget)>>,
 }
 
+/// jni 0.22 splits `JNIEnv` into the FFI-safe `EnvUnowned` that native entry
+/// points receive and the `Env` that carries the actual API.
+fn with_env<R>(env: &mut EnvUnowned<'_>, body: impl FnOnce(&mut Env<'_>) -> R) -> Option<R> {
+    match env
+        .with_env_no_catch(|env| -> Result<R, jni::errors::Error> { Ok(body(env)) })
+        .into_outcome()
+    {
+        jni::Outcome::Ok(value) => Some(value),
+        jni::Outcome::Err(error) => {
+            log_android(&format!("JNI call failed: {error}"));
+            None
+        }
+        jni::Outcome::Panic(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 impl ZygiskModule for PifSpoofModule {
     type Api = V4;
 
     fn pre_app_specialize<'a>(
         &self,
         mut api: ZygiskApi<'a, V4>,
-        mut env: JNIEnv<'a>,
+        mut env: EnvUnowned<'a>,
         args: &'a mut AppSpecializeArgs<'_>,
     ) {
-        let process = read_java_string(&mut env, args.nice_name);
+        with_env(&mut env, |env| {
+        let process = read_java_string(env, args.nice_name);
         let data_dir = read_java_string(&mut env, args.app_data_dir);
         if is_soter_target(process.as_deref(), data_dir.as_deref()) {
             soter::log("Soter host selected: com.tencent.soter.soterserver");
@@ -249,14 +267,16 @@ impl ZygiskModule for PifSpoofModule {
         } else {
             log_android("PIF profile state lock is poisoned");
         }
+        });
     }
 
     fn post_app_specialize<'a>(
         &self,
         _api: ZygiskApi<'a, V4>,
-        mut env: JNIEnv<'a>,
+        mut env: EnvUnowned<'a>,
         _args: &'a AppSpecializeArgs<'a>,
     ) {
+        with_env(&mut env, |env| {
         soter::activate();
         let Some((profile, target)) = self
             .profile
@@ -267,7 +287,7 @@ impl ZygiskModule for PifSpoofModule {
             return;
         };
         if target.spoof_build(&profile) {
-            match apply_build_fields(&mut env, &profile, target) {
+            match apply_build_fields(env, &profile, target) {
                 Ok(()) => log_android(match target {
                     PifTarget::Gms => {
                         "PIF GMS Build fields, TYPE flags and launch SDK readback verified"
@@ -283,12 +303,13 @@ impl ZygiskModule for PifSpoofModule {
         if PROPERTY_SPOOF.get().is_some() {
             log_property_probe();
         }
+        });
     }
 
     fn pre_server_specialize<'a>(
         &self,
         mut api: ZygiskApi<'a, V4>,
-        _env: JNIEnv<'a>,
+        _env: EnvUnowned<'a>,
         _args: &'a mut ServerSpecializeArgs<'_>,
     ) {
         api.set_option(ZygiskOption::DlCloseModuleLibrary);
@@ -1557,8 +1578,8 @@ fn is_gms_data_dir(path: &str) -> bool {
     is_package_data_dir(path, GMS_PACKAGE)
 }
 
-fn read_java_string(env: &mut JNIEnv<'_>, value: &JString<'_>) -> Option<String> {
-    env.get_string(value).ok().map(Into::into)
+fn read_java_string(env: &mut Env<'_>, value: &JString<'_>) -> Option<String> {
+    value.mutf8_chars(env).ok().map(|chars| chars.to_string())
 }
 
 fn read_profile_from_companion(
@@ -1660,7 +1681,7 @@ fn load_profile_for_companion() -> Result<Vec<u8>, String> {
 }
 
 fn apply_build_fields(
-    env: &mut JNIEnv<'_>,
+    env: &mut Env<'_>,
     profile: &PifProfile,
     target: PifTarget,
 ) -> Result<(), String> {
@@ -1668,10 +1689,7 @@ fn apply_build_fields(
     if !target.spoof_build(profile) {
         return Ok(());
     }
-    if env
-        .exception_check()
-        .map_err(|error| format!("cannot check Java exception state: {error}"))?
-    {
+    if env.exception_check() {
         return Err("cannot apply Build fields with a pre-existing Java exception".to_string());
     }
 
@@ -1679,10 +1697,10 @@ fn apply_build_fields(
         .with_local_frame(8, |env| {
             let result: Result<(), String> = (|| {
                 let build = env
-                    .find_class("android/os/Build")
+                    .find_class(jni_str!("android/os/Build"))
                     .map_err(|error| format!("cannot find android.os.Build: {error}"))?;
                 let version = env
-                    .find_class("android/os/Build$VERSION")
+                    .find_class(jni_str!("android/os/Build$VERSION"))
                     .map_err(|error| format!("cannot find android.os.Build.VERSION: {error}"))?;
 
                 for (name, value, owner) in target.build_fields(profile) {
@@ -1696,24 +1714,23 @@ fn apply_build_fields(
                     let object = JObject::from(java_value);
                     env.set_static_field(
                         class,
-                        (class, name, "Ljava/lang/String;"),
+                        &JNIString::from(name),
+                        jni_sig!("Ljava/lang/String;"),
                         JValue::Object(&object),
                     )
                     .map_err(|error| format!("cannot set {name}: {error}"))?;
-                    env.delete_local_ref(object)
-                        .map_err(|error| format!("cannot release {name} value: {error}"))?;
+                    env.delete_local_ref(object);
 
                     let actual = env
-                        .get_static_field(class, name, "Ljava/lang/String;")
+                        .get_static_field(class, &JNIString::from(name), jni_sig!("Ljava/lang/String;"))
                         .and_then(|value| value.l())
                         .map(JString::from)
                         .map_err(|error| format!("cannot read back {name}: {error}"))?;
-                    let actual_value: String = env
-                        .get_string(&actual)
+                    let actual_value: String = actual
+                        .mutf8_chars(env)
                         .map_err(|error| format!("cannot read back {name} string: {error}"))?
-                        .into();
-                    env.delete_local_ref(actual)
-                        .map_err(|error| format!("cannot release {name} readback: {error}"))?;
+                        .to_string();
+                    env.delete_local_ref(actual);
                     if actual_value != value {
                         return Err(format!("{name} readback does not match the PIF profile"));
                     }
@@ -1726,10 +1743,15 @@ fn apply_build_fields(
                     ("IS_USERDEBUG", profile.build_type == "userdebug"),
                     ("IS_USER", profile.build_type == "user"),
                 ] {
-                    env.set_static_field(&build, (&build, name, "Z"), JValue::Bool(value.into()))
+                    env.set_static_field(
+                        &build,
+                        &JNIString::from(name),
+                        jni_sig!("Z"),
+                        JValue::Bool(value.into()),
+                    )
                         .map_err(|error| format!("cannot set {name}: {error}"))?;
                     let actual = env
-                        .get_static_field(&build, name, "Z")
+                        .get_static_field(&build, &JNIString::from(name), jni_sig!("Z"))
                         .and_then(|value| value.z())
                         .map_err(|error| format!("cannot read back {name}: {error}"))?;
                     if actual != value {
@@ -1744,12 +1766,13 @@ fn apply_build_fields(
                     let initial_sdk = profile.initial_sdk_int();
                     env.set_static_field(
                         &version,
-                        (&version, "DEVICE_INITIAL_SDK_INT", "I"),
+                        jni_str!("DEVICE_INITIAL_SDK_INT"),
+                        jni_sig!("I"),
                         JValue::Int(initial_sdk),
                     )
                     .map_err(|error| format!("cannot set DEVICE_INITIAL_SDK_INT: {error}"))?;
                     let actual = env
-                        .get_static_field(&version, "DEVICE_INITIAL_SDK_INT", "I")
+                        .get_static_field(&version, jni_str!("DEVICE_INITIAL_SDK_INT"), jni_sig!("I"))
                         .and_then(|value| value.i())
                         .map_err(|error| {
                             format!("cannot read back DEVICE_INITIAL_SDK_INT: {error}")
@@ -1770,12 +1793,8 @@ fn apply_build_fields(
     if let Err(error) = result {
         // Errors such as a missing field leave a pending JNI exception. It
         // belongs to this best-effort integration, not to the target app.
-        return match env.exception_clear() {
-            Ok(()) => Err(error),
-            Err(clear_error) => Err(format!(
-                "{error}; cannot clear Java exception: {clear_error}"
-            )),
-        };
+        env.exception_clear();
+        return Err(error);
     }
     Ok(())
 }
