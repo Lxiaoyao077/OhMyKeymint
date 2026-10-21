@@ -145,128 +145,134 @@ impl ZygiskModule for PifSpoofModule {
         mut env: EnvUnowned<'a>,
         args: &'a mut AppSpecializeArgs<'_>,
     ) {
-        with_env(&mut env, |env| {
-        let process = read_java_string(env, args.nice_name);
-        let data_dir = read_java_string(&mut env, args.app_data_dir);
-        if is_soter_target(process.as_deref(), data_dir.as_deref()) {
-            soter::log("Soter host selected: com.tencent.soter.soterserver");
-            match api.with_companion(read_soter_from_companion) {
-                Ok(Ok(true)) => {
-                    // Native Binder callbacks may outlive a partially installed
-                    // hook. Keep the payload mapped once installation is attempted.
-                    match soter::install(&mut api) {
-                        Ok(()) => soter::log("Soter Beta hook registered; awaiting specialization"),
-                        Err(error) => soter::log(&format!("Soter Beta hook unavailable: {error}")),
-                    }
-                }
-                Ok(Ok(false)) => {
-                    match soter::prepare_relay(&mut api) {
-                        Ok(()) => {
-                            // Once installation is attempted, native callbacks
-                            // can retain this library even if PLT commit fails.
-                            if let Err(error) = soter::install(&mut api) {
-                                soter::log(&format!("Per-app Soter hook unavailable: {error}"));
+        let _ = with_env(&mut env, |env| {
+            let process = read_java_string(env, args.nice_name);
+            let data_dir = read_java_string(env, args.app_data_dir);
+            if is_soter_target(process.as_deref(), data_dir.as_deref()) {
+                soter::log("Soter host selected: com.tencent.soter.soterserver");
+                match api.with_companion(read_soter_from_companion) {
+                    Ok(Ok(true)) => {
+                        // Native Binder callbacks may outlive a partially installed
+                        // hook. Keep the payload mapped once installation is attempted.
+                        match soter::install(&mut api) {
+                            Ok(()) => {
+                                soter::log("Soter Beta hook registered; awaiting specialization")
+                            }
+                            Err(error) => {
+                                soter::log(&format!("Soter Beta hook unavailable: {error}"))
                             }
                         }
-                        Err(error) => {
-                            soter::log(&format!("Per-app Soter companion unavailable: {error}"));
-                            api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                    }
+                    Ok(Ok(false)) => {
+                        match soter::prepare_relay(&mut api) {
+                            Ok(()) => {
+                                // Once installation is attempted, native callbacks
+                                // can retain this library even if PLT commit fails.
+                                if let Err(error) = soter::install(&mut api) {
+                                    soter::log(&format!("Per-app Soter hook unavailable: {error}"));
+                                }
+                            }
+                            Err(error) => {
+                                soter::log(&format!(
+                                    "Per-app Soter companion unavailable: {error}"
+                                ));
+                                api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                            }
                         }
                     }
-                }
-                result => {
-                    soter::log(&format!("Soter mode configuration unavailable: {result:?}"));
-                    api.set_option(ZygiskOption::DlCloseModuleLibrary);
-                }
-            }
-            return;
-        }
-        let Some(target) = target_process(process.as_deref(), data_dir.as_deref()) else {
-            api.set_option(ZygiskOption::DlCloseModuleLibrary);
-            return;
-        };
-
-        log_android(&format!(
-            "PIF target selected: process={}, data_dir={}",
-            process.as_deref().unwrap_or("<unknown>"),
-            data_dir.as_deref().unwrap_or("<unknown>")
-        ));
-
-        let loaded = match api.with_companion(read_profile_from_companion) {
-            Ok(Ok(profile)) => profile,
-            Ok(Err(error)) => {
-                log_android(&format!(
-                    "PIF companion returned an invalid profile: {error}"
-                ));
-                None
-            }
-            Err(error) => {
-                log_android(&format!("PIF companion connection failed: {error}"));
-                None
-            }
-        };
-        let Some(profile) = loaded else {
-            log_android("PIF profile is disabled or unavailable");
-            api.set_option(ZygiskOption::DlCloseModuleLibrary);
-            return;
-        };
-
-        if !target.spoof_build(&profile) && !target.spoof_props(&profile) {
-            log_android("PIF spoofing is disabled for this process");
-            api.set_option(ZygiskOption::DlCloseModuleLibrary);
-            return;
-        }
-
-        if target.spoof_props(&profile) {
-            initialize_property_spoof(&profile).unwrap_or_else(|error| {
-                log_android(&format!(
-                    "PIF property table initialization failed: {error}"
-                ));
-            });
-            let mut private_properties = false;
-            #[cfg(target_arch = "aarch64")]
-            if let Some(values) = PROPERTY_SPOOF.get() {
-                match property_area::install(values) {
-                    Ok(count) => {
-                        private_properties = true;
-                        log_android(&format!(
-                            "PIF private property areas installed ({count} properties)"
-                        ));
+                    result => {
+                        soter::log(&format!("Soter mode configuration unavailable: {result:?}"));
+                        api.set_option(ZygiskOption::DlCloseModuleLibrary);
                     }
-                    Err(error) => log_android(&format!(
-                        "PIF private property areas unavailable; using hooks: {error}"
-                    )),
+                }
+                return;
+            }
+            let Some(target) = target_process(process.as_deref(), data_dir.as_deref()) else {
+                api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                return;
+            };
+
+            log_android(&format!(
+                "PIF target selected: process={}, data_dir={}",
+                process.as_deref().unwrap_or("<unknown>"),
+                data_dir.as_deref().unwrap_or("<unknown>")
+            ));
+
+            let loaded = match api.with_companion(read_profile_from_companion) {
+                Ok(Ok(profile)) => profile,
+                Ok(Err(error)) => {
+                    log_android(&format!(
+                        "PIF companion returned an invalid profile: {error}"
+                    ));
+                    None
+                }
+                Err(error) => {
+                    log_android(&format!("PIF companion connection failed: {error}"));
+                    None
+                }
+            };
+            let Some(profile) = loaded else {
+                log_android("PIF profile is disabled or unavailable");
+                api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                return;
+            };
+
+            if !target.spoof_build(&profile) && !target.spoof_props(&profile) {
+                log_android("PIF spoofing is disabled for this process");
+                api.set_option(ZygiskOption::DlCloseModuleLibrary);
+                return;
+            }
+
+            if target.spoof_props(&profile) {
+                initialize_property_spoof(&profile).unwrap_or_else(|error| {
+                    log_android(&format!(
+                        "PIF property table initialization failed: {error}"
+                    ));
+                });
+                let mut private_properties = false;
+                #[cfg(target_arch = "aarch64")]
+                if let Some(values) = PROPERTY_SPOOF.get() {
+                    match property_area::install(values) {
+                        Ok(count) => {
+                            private_properties = true;
+                            log_android(&format!(
+                                "PIF private property areas installed ({count} properties)"
+                            ));
+                        }
+                        Err(error) => log_android(&format!(
+                            "PIF private property areas unavailable; using hooks: {error}"
+                        )),
+                    }
+                }
+                if !private_properties {
+                    // Zygisk only permits its API (including PLT registration) before
+                    // app specialization. Java fields are applied afterwards.
+                    match install_property_hook(&mut api, &profile) {
+                        Ok(count) => log_android(&format!(
+                            "PIF native PLT hooks installed for {count} imported symbol(s)"
+                        )),
+                        Err(error) => log_android(&format!(
+                            "PIF native PLT hooks unavailable; continuing with inline/Java spoof: {error}"
+                        )),
+                    }
+                    // Cover native libraries loaded after specialization as well.
+                    match install_inline_property_hook() {
+                        Ok(bytes) if bytes > 0 => log_android(&format!(
+                            "PIF inline property callback hook installed ({bytes} bytes)"
+                        )),
+                        Ok(_) => log_android("PIF inline property callback hook already installed"),
+                        Err(error) => log_android(&format!(
+                            "PIF inline property callback hook unavailable: {error}"
+                        )),
+                    }
                 }
             }
-            if !private_properties {
-                // Zygisk only permits its API (including PLT registration) before
-                // app specialization. Java fields are applied afterwards.
-                match install_property_hook(&mut api, &profile) {
-                    Ok(count) => log_android(&format!(
-                        "PIF native PLT hooks installed for {count} imported symbol(s)"
-                    )),
-                    Err(error) => log_android(&format!(
-                        "PIF native PLT hooks unavailable; continuing with inline/Java spoof: {error}"
-                    )),
-                }
-                // Cover native libraries loaded after specialization as well.
-                match install_inline_property_hook() {
-                    Ok(bytes) if bytes > 0 => log_android(&format!(
-                        "PIF inline property callback hook installed ({bytes} bytes)"
-                    )),
-                    Ok(_) => log_android("PIF inline property callback hook already installed"),
-                    Err(error) => log_android(&format!(
-                        "PIF inline property callback hook unavailable: {error}"
-                    )),
-                }
+            api.set_option(ZygiskOption::ForceDenylistUnmount);
+            if let Ok(mut current) = self.profile.lock() {
+                *current = Some((profile, target));
+            } else {
+                log_android("PIF profile state lock is poisoned");
             }
-        }
-        api.set_option(ZygiskOption::ForceDenylistUnmount);
-        if let Ok(mut current) = self.profile.lock() {
-            *current = Some((profile, target));
-        } else {
-            log_android("PIF profile state lock is poisoned");
-        }
         });
     }
 
@@ -276,33 +282,35 @@ impl ZygiskModule for PifSpoofModule {
         mut env: EnvUnowned<'a>,
         _args: &'a AppSpecializeArgs<'a>,
     ) {
-        with_env(&mut env, |env| {
-        soter::activate();
-        let Some((profile, target)) = self
-            .profile
-            .lock()
-            .ok()
-            .and_then(|mut current| current.take())
-        else {
-            return;
-        };
-        if target.spoof_build(&profile) {
-            match apply_build_fields(env, &profile, target) {
-                Ok(()) => log_android(match target {
-                    PifTarget::Gms => {
-                        "PIF GMS Build fields, TYPE flags and launch SDK readback verified"
+        let _ = with_env(&mut env, |env| {
+            soter::activate();
+            let Some((profile, target)) = self
+                .profile
+                .lock()
+                .ok()
+                .and_then(|mut current| current.take())
+            else {
+                return;
+            };
+            if target.spoof_build(&profile) {
+                match apply_build_fields(env, &profile, target) {
+                    Ok(()) => log_android(match target {
+                        PifTarget::Gms => {
+                            "PIF GMS Build fields, TYPE flags and launch SDK readback verified"
+                        }
+                        PifTarget::PlayStore => {
+                            "PIF Play Store Build fields and TYPE flags readback verified"
+                        }
+                    }),
+                    Err(error) => {
+                        log_android(&format!("failed to apply PIF Build fields: {error}"))
                     }
-                    PifTarget::PlayStore => {
-                        "PIF Play Store Build fields and TYPE flags readback verified"
-                    }
-                }),
-                Err(error) => log_android(&format!("failed to apply PIF Build fields: {error}")),
+                }
             }
-        }
 
-        if PROPERTY_SPOOF.get().is_some() {
-            log_property_probe();
-        }
+            if PROPERTY_SPOOF.get().is_some() {
+                log_property_probe();
+            }
         });
     }
 
@@ -1722,11 +1730,17 @@ fn apply_build_fields(
                     env.delete_local_ref(object);
 
                     let actual = env
-                        .get_static_field(class, &JNIString::from(name), jni_sig!("Ljava/lang/String;"))
+                        .get_static_field(
+                            class,
+                            &JNIString::from(name),
+                            jni_sig!("Ljava/lang/String;"),
+                        )
                         .and_then(|value| value.l())
-                        .map(JString::from)
                         .map_err(|error| format!("cannot read back {name}: {error}"))?;
-                    let actual_value: String = actual
+                    let actual_string = env
+                        .as_cast::<JString>(&actual)
+                        .map_err(|error| format!("cannot read back {name} as String: {error}"))?;
+                    let actual_value: String = actual_string
                         .mutf8_chars(env)
                         .map_err(|error| format!("cannot read back {name} string: {error}"))?
                         .to_string();
@@ -1749,7 +1763,7 @@ fn apply_build_fields(
                         jni_sig!("Z"),
                         JValue::Bool(value.into()),
                     )
-                        .map_err(|error| format!("cannot set {name}: {error}"))?;
+                    .map_err(|error| format!("cannot set {name}: {error}"))?;
                     let actual = env
                         .get_static_field(&build, &JNIString::from(name), jni_sig!("Z"))
                         .and_then(|value| value.z())
@@ -1772,7 +1786,11 @@ fn apply_build_fields(
                     )
                     .map_err(|error| format!("cannot set DEVICE_INITIAL_SDK_INT: {error}"))?;
                     let actual = env
-                        .get_static_field(&version, jni_str!("DEVICE_INITIAL_SDK_INT"), jni_sig!("I"))
+                        .get_static_field(
+                            &version,
+                            jni_str!("DEVICE_INITIAL_SDK_INT"),
+                            jni_sig!("I"),
+                        )
                         .and_then(|value| value.i())
                         .map_err(|error| {
                             format!("cannot read back DEVICE_INITIAL_SDK_INT: {error}")
