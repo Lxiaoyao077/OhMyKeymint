@@ -45,9 +45,10 @@ BINARY_SPECS = (
     {"package": None, "bin": "keymint", "output_name": "keymint"},
     {"package": "injector", "bin": "inject", "output_name": "inject"},
 )
+SOTERTA_SERVICE_NAME = "soterta-svc"
+PIF_SPOOF_PACKAGE = "soter-spoof"
+PIF_SPOOF_LIBRARY = "libsoter_spoof.so"
 
-SOTER_SPOOF_PACKAGE = "soter-spoof"
-SOTER_SPOOF_LIBRARY = "libsoter_spoof.so"
 REQUIRED_TEMPLATE_FILES = (
     "customize.sh",
     "daemon",
@@ -57,6 +58,7 @@ REQUIRED_TEMPLATE_FILES = (
     "uninstall.sh",
     "post-fs-data.sh",
     "service.sh",
+    "soterta.sh",
     "verify.sh",
     "webroot",
 )
@@ -67,7 +69,9 @@ MODULE_TEXT_FILES = (
     "LICENSE.md",
     "README.md",
     "THIRD_PARTY_LICENSES/Tricky-Addon-Update-Target-List.txt",
+    "THIRD_PARTY_LICENSES/zygisk-api-0BSD.txt",
     "THIRD_PARTY_LICENSES/D-soter.txt",
+    "THIRD_PARTY_LICENSES/ommega-soter-ta.txt",
     "customize.sh",
     "daemon",
     "daemon-injector",
@@ -79,6 +83,7 @@ MODULE_TEXT_FILES = (
     "post-fs-data.sh",
     "sepolicy.rule",
     "service.sh",
+    "soterta.sh",
     "verify.sh",
     "META-INF/com/google/android/update-binary",
     "META-INF/com/google/android/updater-script",
@@ -207,6 +212,23 @@ def copy_binary(binary: Path, output_name: str, abi: str, stage_dir: Path) -> No
     print(f"Copied {binary} to {dest_path}")
 
 
+def build_soterta_service(*, abi: str, release: bool) -> Path:
+    """Build and stage the Rust Soter Binder daemon for the module archive."""
+    profile = "release" if release else "debug"
+    command = [
+        os.fspath(Path(__file__).resolve().parent / "scripts" / "build_soterta_svc.py"),
+        "--abi",
+        abi,
+    ]
+    if not release:
+        command.append("--debug")
+    run([os.fspath(Path(sys.executable)), *command])
+    output = TARGET_ROOT / "soterta-svc" / abi / profile / SOTERTA_SERVICE_NAME
+    if not output.is_file():
+        raise FileNotFoundError(f"Built Soter service not found at {output}")
+    return output
+
+
 def build_cdylib(
     *,
     abi: str,
@@ -262,12 +284,20 @@ def copy_project_documents(stage_dir: Path) -> None:
         (REPO_ROOT / "LICENSE.md", stage_dir / "LICENSE.md"),
         (REPO_ROOT / "LICENSE-2", stage_dir / "LICENSE-2"),
         (
+            REPO_ROOT / "webui" / "LICENSE.upstream",
+            stage_dir / "THIRD_PARTY_LICENSES" / "Tricky-Addon-Update-Target-List.txt",
+        ),
+        (
+            REPO_ROOT / "third_party" / "zygisk-api" / "LICENSE",
+            stage_dir / "THIRD_PARTY_LICENSES" / "zygisk-api-0BSD.txt",
+        ),
+        (
             REPO_ROOT / "soter-spoof" / "D-soter.NOTICE",
             stage_dir / "THIRD_PARTY_LICENSES" / "D-soter.txt",
         ),
         (
-            REPO_ROOT / "webui" / "LICENSE.upstream",
-            stage_dir / "THIRD_PARTY_LICENSES" / "Tricky-Addon-Update-Target-List.txt",
+            REPO_ROOT / "template" / "THIRD_PARTY_LICENSES" / "ommega-soter-ta.txt",
+            stage_dir / "THIRD_PARTY_LICENSES" / "ommega-soter-ta.txt",
         ),
     )
     for source, destination in documents:
@@ -449,13 +479,15 @@ def build_package_for_abi(
                 package=spec["package"],
                 bin_name=spec["bin"],
             )
-        soter_payload = build_cdylib(
+        soterta_service = build_soterta_service(abi=abi, release=release)
+        pif_payload = build_cdylib(
             abi=abi,
             target=target,
             release=release,
-            package=SOTER_SPOOF_PACKAGE,
-            library_name=SOTER_SPOOF_LIBRARY,
+            package=PIF_SPOOF_PACKAGE,
+            library_name=PIF_SPOOF_LIBRARY,
         )
+
         copy_template_files(stage_dir)
         copy_project_documents(stage_dir)
         normalize_module_text_files(stage_dir)
@@ -467,7 +499,8 @@ def build_package_for_abi(
                 abi,
                 stage_dir,
             )
-        copy_zygisk_payload(soter_payload, abi, stage_dir)
+        copy_binary(soterta_service, SOTERTA_SERVICE_NAME, abi, stage_dir)
+        copy_zygisk_payload(pif_payload, abi, stage_dir)
 
         modify_module_prop(stage_dir, version, git_count, git_hash, release)
         normalize_module_text_files(stage_dir)

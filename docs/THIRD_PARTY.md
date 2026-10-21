@@ -78,6 +78,18 @@ not just the fingerprint, and does not change either SDK integer or native
 properties. No provider, signature, or Play Store SDK spoofing implementation
 is bundled.
 
+The long-property layout and legacy-reader behavior are checked against AOSP
+bionic's Android 17
+[`prop_info`](https://android.googlesource.com/platform/bionic/+/refs/heads/android17-release/libc/system_properties/include/system_properties/prop_info.h),
+[`prop_info` constructors](https://android.googlesource.com/platform/bionic/+/refs/heads/android17-release/libc/system_properties/prop_info.cpp),
+and [`SystemProperties` readers](https://android.googlesource.com/platform/bionic/+/refs/heads/android17-release/libc/system_properties/system_properties.cpp).
+The derived `Build.TYPE` flags are checked against AOSP `Build.java` in
+[Android 12](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android12-release/core/java/android/os/Build.java)
+and [Android 17](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android17-release/core/java/android/os/Build.java).
+These are ABI and field-contract references; the implementation remains Rust
+and does not bundle framework or libc binaries. Source-contract checks do not
+constitute runtime validation on each Android release.
+
 ## Google attestation status snapshot
 
 The module includes the public JSON snapshot used to seed the local
@@ -99,27 +111,59 @@ independent.
 
 ## D-soter compatibility experiment
 
-The optional Tencent Soter compatibility (Beta) reply contract is adapted from
-[D-soter](https://github.com/947409161/D-soter), revision
-`37c6e6a3c099326892883be7ae7eeb1b2c5801d2`, `module/jni/dsoter.cpp`,
-`module/jni/soter_attk.h`, `module/jni/soter_keys.h`, and `module/jni/soter_jni.h`,
-licensed under Apache-2.0. Android's RSA provider generates independent RSA-2048
-ASK and AuthKey pairs per caller UID and exact UTF-16 alias. The reference ATTK
-signs ASK exports; each ASK signs its AuthKey exports with RSASSA-PSS (SHA-256,
-MGF1-SHA256, salt length 20, `emBits` 2047). The `cpu_id` and device identifier
-are derived from the unit serial. Keys, stable exports, and their lifecycle are
-process-local.
-The Rust implementation in `soter-spoof/src/soter.rs` and
-`soter-spoof/src/soter/` implements all 13 reply contracts with a separate native
-Binder stub and bounded descriptor matching. The platform validates the AIDL header
-before argument parsing on Android 12-17, and `soter-spoof/src/attk.rs` implements
-JNI key generation and the reference signing parameters. No upstream prebuilt
-library or C++ runtime component is bundled.
-It does not alter KeyMint or injector routing. The replies are software-generated mock
-responses: they are not genuine attestation or payment credentials.
+The optional Tencent Soter compatibility (Beta) reply contract and public-key
+placeholder are adapted from [ajfkdk/D-soter](https://github.com/ajfkdk/D-soter),
+`module/jni/dsoter.cpp` at commit
+[`6148e02ea5977cb95b5a162a405fc915e39c01db`](https://github.com/ajfkdk/D-soter/commit/6148e02ea5977cb95b5a162a405fc915e39c01db),
+licensed under Apache-2.0. The Rust implementation in `soter-spoof/src/soter.rs`
+and `soter-spoof/src/soter/` implements all 13 reply contracts with a separate
+native Binder stub and bounded descriptor matching. Android 12/12L retain the
+NDK platform's standard AIDL header check. No upstream prebuilt library or C++
+runtime component is bundled.
+It shares only the existing Zygisk loader entry with PIF and does not alter
+KeyMint or injector routing. The fixed public key and zero-filled signatures
+are mock responses, not genuine attestation or payment credentials.
 
 The release includes this attribution in `THIRD_PARTY_LICENSES/D-soter.txt` and
 the Apache-2.0 terms in `AOSP.Apache-license-2.0.txt`.
+
+## Qualcomm Soter software TA
+
+The Qualcomm Soter HAL software TA and Binder service are adapted from the
+`soter-ta` and `soterta-svc` components of
+[Andrea-lyz/ommega](https://github.com/Andrea-lyz/ommega), licensed under
+AGPL-3.0-or-later. The service is isolated behind
+`vendor.qti.hardware.soter.ISoter/default`, uses OMK's persistent data path,
+and retains the upstream remote-relay contract. It does not replace the OMK
+KeyMint route or the independent Tencent Soter compatibility experiment.
+
+Relay package hints and per-instance SoterServer reconnection are adapted from
+[jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega), under the same
+AGPL-3.0-or-later license, reviewed at
+[`f86b7913829c379e112b46c71dd502ef534eb39e`](https://github.com/jiyin004-jpg/ommega/commit/f86b7913829c379e112b46c71dd502ef534eb39e).
+The relevant changes are
+[`c09567f2d1299c757a02a5a19dcf3dc154ad666a`](https://github.com/jiyin004-jpg/ommega/commit/c09567f2d1299c757a02a5a19dcf3dc154ad666a)
+and
+[`f5b2247e9b3240730a0b52d12f971a57ac98e352`](https://github.com/jiyin004-jpg/ommega/commit/f5b2247e9b3240730a0b52d12f971a57ac98e352).
+OMK retains explicit remote failure handling without local key fallback and
+does not automatically reset application preferences or remote key slots.
+The Rust Binder entry point's dual transaction layouts follow
+`6fdb8e1b4852b022cd37431d47a359b32230db0e`; native buffer replies and conditional
+ASK confirmation follow `91a896a8689e8ba8226aa05ba28e00b75c09d1c0`. The staged
+public-material diagnostics reference `ba75a57fd92749d6f52ad49065956dc5378c4af3`
+(`b-side/source/src/soter/flow.rs`). OMK resolves request layouts per call and
+keeps diagnostics strictly read-only; it does not import the upstream mutation,
+automatic reset, Keybox forwarding or KeyMint forwarding flows.
+
+## Vendor RKP repair
+
+The optional **Fix RKP** action references the fixed vendor-tool invocation in
+[jiyin004-jpg/ommega](https://github.com/jiyin004-jpg/ommega/blob/c6172dc553543aa8eea1b7e03cd50c2ff6f1efb1/a-side/source/template/webroot/index.html#L1471),
+licensed under AGPL-3.0-or-later. OMK implements the command in Rust with an
+explicit persistent-write confirmation and uses only the device's existing
+`/vendor/bin/KmInstallKeybox`. No upstream vendor executable, shell function,
+Keybox material or RKP CSR-format change is included. The output is a vendor
+tool completion report, not proof of successful Google provisioning.
 
 ## Native HTTPS client
 

@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 #![feature(once_cell_try)]
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::panic;
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub mod att_mgr;
 pub mod config;
 pub mod consts;
 pub mod global;
+pub mod gms_cache;
 pub mod keybox;
 pub mod keymaster;
 pub mod keymint;
@@ -35,9 +36,11 @@ pub mod macros;
 pub mod pif_spoof;
 pub mod plat;
 pub mod proto;
+pub mod rkp_repair;
 pub mod security_patch;
 pub mod selinux;
 pub mod soter_beta;
+pub mod soter_hal;
 pub mod utils;
 pub mod watchdog;
 pub mod webui_activity;
@@ -332,6 +335,7 @@ struct WebUiDiagnostics {
     keymint: WebUiServiceDiagnostic,
     keystore2: WebUiServiceDiagnostic,
     injector: WebUiServiceDiagnostic,
+    soter: WebUiServiceDiagnostic,
     tee: WebUiHardwareDiagnostic,
     strongbox: WebUiHardwareDiagnostic,
     rkp_tee: WebUiServiceDiagnostic,
@@ -492,6 +496,17 @@ fn webui_diagnostics() -> String {
     let keystore_pid = process_pid(&["keystore2"], None);
     let injector_pid = pidfile_process("/data/adb/omk/injector-daemon.pid", "daemon-injector")
         .or_else(|| process_pid(&["inject"], None));
+    let soter_pid = pidfile_process(
+        "/data/misc/keystore/omk/data/soterta/daemon.pid",
+        "soterta-svc",
+    )
+    .or_else(|| process_pid(&["soterta-svc", "soter-svc"], None));
+    let soter_status = match soter_hal::is_enabled() {
+        Ok(true) if soter_pid.is_some() => "running",
+        Ok(true) => "configured",
+        Ok(false) => "disabled",
+        Err(_) => "unknown",
+    };
     serde_json::to_string(&WebUiDiagnostics {
         keymint: service_diagnostic(
             if keymint_pid.is_some() {
@@ -517,6 +532,7 @@ fn webui_diagnostics() -> String {
             },
             injector_pid,
         ),
+        soter: service_diagnostic(soter_status, soter_pid),
         tee: hardware_diagnostic(SecurityLevel::TRUSTED_ENVIRONMENT),
         strongbox: hardware_diagnostic(SecurityLevel::STRONGBOX),
         rkp_tee: rkp_diagnostic("default"),
@@ -604,84 +620,6 @@ fn handle_webui_keybox_command() -> Option<Result<String, String>> {
     }
 }
 
-fn handle_webui_pif_command() -> Option<Result<String, String>> {
-    let mut args = std::env::args();
-    let _program = args.next();
-    let command = args.next()?;
-
-    match command.as_str() {
-        "--webui-get-pif-fingerprint-state" => {
-            if args.next().is_some() {
-                return Some(Err(
-                    "--webui-get-pif-fingerprint-state does not accept arguments".to_string(),
-                ));
-            }
-            prepare_android_storage();
-            Some(pif_spoof::fingerprint_state().map_err(|error| format!("{error:#}")))
-        }
-        "--webui-list-pif-devices" => {
-            if args.next().is_some() {
-                return Some(Err(
-                    "--webui-list-pif-devices does not accept arguments".to_string()
-                ));
-            }
-            Some(pif_spoof::list_devices().map_err(|error| format!("{error:#}")))
-        }
-        "--webui-apply-pif-fingerprint" => {
-            let product = match args.next() {
-                Some(product) => product,
-                None => {
-                    return Some(Err(
-                        "--webui-apply-pif-fingerprint requires a product".to_string()
-                    ))
-                }
-            };
-            let options: Vec<String> = args.collect();
-            let (spoof_build, spoof_props, spoof_vending_build) = match options.as_slice() {
-                [] => (true, true, false),
-                [build, props]
-                    if matches!(build.as_str(), "0" | "1")
-                        && matches!(props.as_str(), "0" | "1") =>
-                {
-                    (build == "1", props == "1", false)
-                }
-                [build, props, vending]
-                    if matches!(build.as_str(), "0" | "1")
-                        && matches!(props.as_str(), "0" | "1")
-                        && matches!(vending.as_str(), "0" | "1") =>
-                {
-                    (build == "1", props == "1", vending == "1")
-                }
-                _ => {
-                    return Some(Err(
-                        "--webui-apply-pif-fingerprint accepts a product, optional spoofBuild spoofProps flags, and an optional spoofVendingBuild flag (0 or 1)".to_string(),
-                    ));
-                }
-            };
-            prepare_android_storage();
-            Some(
-                pif_spoof::apply_fingerprint(
-                    &product,
-                    spoof_build,
-                    spoof_props,
-                    spoof_vending_build,
-                )
-                .map_err(|error| format!("{error:#}")),
-            )
-        }
-        "--webui-disable-pif-fingerprint" => {
-            if args.next().is_some() {
-                return Some(Err(
-                    "--webui-disable-pif-fingerprint does not accept arguments".to_string(),
-                ));
-            }
-            prepare_android_storage();
-            Some(pif_spoof::disable_fingerprint().map_err(|error| format!("{error:#}")))
-        }
-        _ => None,
-    }
-}
-
 fn handle_webui_diagnostics_command() -> Option<Result<String, String>> {
     let mut args = std::env::args();
     let _program = args.next();
@@ -737,6 +675,21 @@ fn handle_webui_app_patch_command(
     }
 }
 
+fn ensure_soter_features_are_exclusive(
+    requested_enabled: bool,
+    other_enabled: Result<bool>,
+    requested_name: &str,
+    other_name: &str,
+) -> Result<()> {
+    if !requested_enabled {
+        return Ok(());
+    }
+    if other_enabled? {
+        bail!("{requested_name} cannot be enabled while {other_name} is enabled; disable it first");
+    }
+    Ok(())
+}
+
 fn handle_webui_soter_beta_command(
     mut args: impl Iterator<Item = String>,
 ) -> Option<Result<String, String>> {
@@ -756,17 +709,95 @@ fn handle_webui_soter_beta_command(
                     "--webui-set-soter-beta requires exactly one argument: 0 or 1".to_string(),
                 ));
             }
-            let enabled = match soter_common::parse(value.unwrap().as_bytes()) {
+            let enabled = match pif_common::soter::parse(value.unwrap().as_bytes()) {
                 Ok(enabled) => enabled,
                 Err(error) => return Some(Err(error.to_string())),
             };
             if let Err(error) = soter_beta::require_root() {
                 return Some(Err(format!("{error:#}")));
             }
+            if enabled {
+                if let Err(error) = ensure_soter_features_are_exclusive(
+                    true,
+                    soter_hal::is_enabled(),
+                    "Tencent Soter Beta",
+                    "Qualcomm Soter HAL",
+                ) {
+                    return Some(Err(format!(
+                        "failed to validate Soter feature selection: {error:#}"
+                    )));
+                }
+            }
             prepare_android_storage();
             Some(
                 soter_beta::save(enabled)
                     .map(|()| "soter_beta_saved".to_string())
+                    .map_err(|error| format!("{error:#}")),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn handle_webui_soter_hal_command(
+    mut args: impl Iterator<Item = String>,
+) -> Option<Result<String, String>> {
+    let command = args.next()?;
+    match command.as_str() {
+        "--webui-get-soter-hal" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-soter-hal does not accept arguments".to_string()
+                ));
+            }
+            Some(soter_hal::state_json().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-set-soter-hal" | "--webui-set-soter-hal-base64" => {
+            let payload = args.next();
+            if payload.is_none() || args.next().is_some() {
+                return Some(Err(format!(
+                    "{command} requires exactly one configuration argument"
+                )));
+            }
+            let payload = payload.expect("payload checked above");
+            let parsed = if command == "--webui-set-soter-hal-base64" {
+                soter_hal::Config::parse_base64(&payload)
+            } else {
+                soter_hal::Config::parse(&payload)
+            };
+            let config = match parsed {
+                Ok(config) => config,
+                Err(error) => return Some(Err(format!("{error:#}"))),
+            };
+            if config.enabled || config.app_enabled {
+                if let Err(error) = ensure_soter_features_are_exclusive(
+                    true,
+                    soter_beta::is_enabled(),
+                    "Qualcomm Soter HAL",
+                    "Tencent Soter Beta",
+                ) {
+                    return Some(Err(format!(
+                        "failed to validate Soter feature selection: {error:#}"
+                    )));
+                }
+            }
+            prepare_android_storage();
+            Some(
+                soter_hal::save(config)
+                    .map(|()| "soter_hal_saved".to_string())
+                    .map_err(|error| format!("{error:#}")),
+            )
+        }
+        "--webui-set-soter-app-target-base64" => {
+            let Some(payload) = args.next() else {
+                return Some(Err("Soter app selection requires one encoded change".into()));
+            };
+            if args.next().is_some() {
+                return Some(Err("Soter app selection accepts only one change".into()));
+            }
+            Some(
+                soter_hal::AppTargetChange::parse_base64(&payload)
+                    .and_then(soter_hal::save_app_target)
                     .map_err(|error| format!("{error:#}")),
             )
         }
@@ -828,6 +859,74 @@ fn handle_webui_security_bulletin_command() -> Option<Result<String, String>> {
         crate::security_patch::download_android_security_bulletin(&url)
             .map_err(|error| format!("{error:#}")),
     )
+}
+
+fn handle_webui_pif_command() -> Option<Result<String, String>> {
+    let mut args = std::env::args();
+    let _program = args.next();
+    let command = args.next()?;
+
+    match command.as_str() {
+        "--webui-get-pif-fingerprint-state" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-get-pif-fingerprint-state does not accept arguments".to_string(),
+                ));
+            }
+            prepare_android_storage();
+            Some(pif_spoof::fingerprint_state().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-list-pif-devices" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-list-pif-devices does not accept arguments".to_string()
+                ));
+            }
+            Some(pif_spoof::list_devices().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-apply-pif-fingerprint" => {
+            let product = match args.next() {
+                Some(product) => product,
+                None => {
+                    return Some(Err(
+                        "--webui-apply-pif-fingerprint requires exactly one product".to_string(),
+                    ))
+                }
+            };
+            let options: Vec<String> = args.collect();
+            let (spoof_build, spoof_props, spoof_vending_build) = match options.as_slice() {
+                [] => (true, true, false),
+                [build, props] if matches!(build.as_str(), "0" | "1")
+                    && matches!(props.as_str(), "0" | "1") => (build == "1", props == "1", false),
+                [build, props, vending] if matches!(build.as_str(), "0" | "1")
+                    && matches!(props.as_str(), "0" | "1")
+                    && matches!(vending.as_str(), "0" | "1") => (build == "1", props == "1", vending == "1"),
+                _ => return Some(Err(
+                    "--webui-apply-pif-fingerprint accepts a product, optional spoofBuild spoofProps flags, and an optional spoofVendingBuild flag (0 or 1)".to_string(),
+                )),
+            };
+            prepare_android_storage();
+            Some(
+                pif_spoof::apply_fingerprint(
+                    &product,
+                    spoof_build,
+                    spoof_props,
+                    spoof_vending_build,
+                )
+                .map_err(|error| format!("{error:#}")),
+            )
+        }
+        "--webui-disable-pif-fingerprint" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-disable-pif-fingerprint does not accept arguments".to_string(),
+                ));
+            }
+            prepare_android_storage();
+            Some(pif_spoof::disable_fingerprint().map_err(|error| format!("{error:#}")))
+        }
+        _ => None,
+    }
 }
 
 fn handle_webui_activity_command() -> Option<Result<String, String>> {
@@ -898,6 +997,33 @@ fn handle_webui_activity_command() -> Option<Result<String, String>> {
     }
 }
 
+fn handle_webui_maintenance_command(
+    mut args: impl Iterator<Item = String>,
+) -> Option<Result<String, String>> {
+    match args.next()?.as_str() {
+        "--webui-clear-gms-cache" => {
+            if args.next().is_some() {
+                return Some(Err(
+                    "--webui-clear-gms-cache does not accept arguments".into()
+                ));
+            }
+            Some(gms_cache::clear().map_err(|error| format!("{error:#}")))
+        }
+        "--webui-repair-rkp" => {
+            if args.next().as_deref() != Some("--confirm-persistent-write") || args.next().is_some()
+            {
+                return Some(Err("RKP repair requires --confirm-persistent-write; the vendor tool can permanently modify persist/TEE data".into()));
+            }
+            Some(
+                rkp_repair::run()
+                    .map(|()| "rkp_tool_completed".into())
+                    .map_err(|error| format!("{error:#}")),
+            )
+        }
+        _ => None,
+    }
+}
+
 fn main() {
     // WebUI diagnostics query the registered Binder services before entering
     // the long-running KeyMint server path. Initialize the Binder process
@@ -906,6 +1032,7 @@ fn main() {
     let _ = rsbinder::ProcessState::init_default();
     if let Some(result) = handle_webui_diagnostics_command()
         .or_else(|| handle_webui_app_patch_command(std::env::args().skip(1)))
+        .or_else(|| handle_webui_maintenance_command(std::env::args().skip(1)))
     {
         match result {
             Ok(output) => println!("{output}"),
@@ -928,7 +1055,7 @@ fn main() {
         return;
     }
 
-    if let Some(result) = handle_webui_pif_command() {
+    if let Some(result) = handle_webui_soter_hal_command(std::env::args().skip(1)) {
         match result {
             Ok(output) => println!("{output}"),
             Err(error) => {
@@ -940,6 +1067,17 @@ fn main() {
     }
 
     if let Some(result) = handle_webui_activity_command() {
+        match result {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
+    if let Some(result) = handle_webui_pif_command() {
         match result {
             Ok(output) => println!("{output}"),
             Err(error) => {
@@ -1124,6 +1262,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn webui_soter_hal_rejects_invalid_arguments_before_storage_setup() {
+        for arguments in [
+            vec!["--webui-get-soter-hal", "extra"],
+            vec!["--webui-set-soter-hal"],
+            vec!["--webui-set-soter-hal", "{}", "extra"],
+            vec!["--webui-set-soter-hal-base64"],
+            vec!["--webui-set-soter-hal-base64", "e30=", "extra"],
+            vec!["--webui-set-soter-hal-base64", "not-base64"],
+            vec!["--webui-set-soter-hal-base64", "/w=="],
+            vec!["--webui-set-soter-hal-base64", "e30="],
+            vec!["--webui-set-soter-app-target-base64"],
+            vec!["--webui-set-soter-app-target-base64", "e30="],
+            vec!["--webui-set-soter-app-target-base64", "bad", "extra"],
+        ] {
+            assert!(
+                handle_webui_soter_hal_command(arguments.into_iter().map(str::to_string))
+                    .unwrap()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_requires_exact_arguments_before_any_side_effect() {
+        for arguments in [
+            vec!["--webui-clear-gms-cache", "extra"],
+            vec!["--webui-repair-rkp"],
+            vec!["--webui-repair-rkp", "true"],
+            vec!["--webui-repair-rkp", "--confirm-persistent-write", "extra"],
+        ] {
+            assert!(
+                handle_webui_maintenance_command(arguments.into_iter().map(str::to_string))
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        assert!(handle_webui_maintenance_command(["unknown".to_string()].into_iter()).is_none());
+    }
+
+    #[test]
     fn webui_soter_beta_rejects_invalid_arguments_before_storage_setup() {
         for arguments in [
             vec!["--webui-get-soter-beta", "1"],
@@ -1138,6 +1316,40 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn soter_features_allow_one_enabled_service_and_fail_closed_on_conflict() {
+        assert!(ensure_soter_features_are_exclusive(
+            true,
+            Ok(false),
+            "Tencent Soter Beta",
+            "Qualcomm Soter HAL",
+        )
+        .is_ok());
+        let conflict = ensure_soter_features_are_exclusive(
+            true,
+            Ok(true),
+            "Qualcomm Soter HAL",
+            "Tencent Soter Beta",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(conflict.contains("cannot be enabled"));
+        assert!(ensure_soter_features_are_exclusive(
+            false,
+            Err(anyhow::anyhow!("unreadable state")),
+            "Tencent Soter Beta",
+            "Qualcomm Soter HAL",
+        )
+        .is_ok());
+        assert!(ensure_soter_features_are_exclusive(
+            true,
+            Err(anyhow::anyhow!("unreadable state")),
+            "Tencent Soter Beta",
+            "Qualcomm Soter HAL",
+        )
+        .is_err());
     }
 
     #[test]
