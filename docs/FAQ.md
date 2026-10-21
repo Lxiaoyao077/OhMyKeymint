@@ -673,7 +673,7 @@ If a maintainer needs information above, share it with proper measures.
 
 ### Is commercial use allowed?
 
-No. Both the [GNU AGPL version 3 or later](../LICENSE.md) and the
+No. Both the [General License Agreement version 4 or later](../LICENSE.md) and the
 [Oh My Keymint License](../LICENSE-2) apply together. The additional license
 prohibits commercial use and contains other conditions. Read both before using
 or distributing OMK.

@@ -190,7 +190,7 @@ represent, warrant, and agree that:
    complete copyright, together with any other permission required to submit it.
 2. Your Contribution, as part of this project, is subject to and complies with
    both licenses current at the time of submission: the
-   [GNU Affero General Public License version 3 or any later version](../LICENSE.md)
+   [General License Agreement version 4 or any later version](../LICENSE.md)
    and the [Oh My Keymint License](../LICENSE-2). The two licenses apply together;
    they are not alternatives. Properly disclosed third-party material remains
    subject to its original license.
