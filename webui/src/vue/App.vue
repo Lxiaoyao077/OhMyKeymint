@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
   MiuixDialog,
   MiuixIcon,
@@ -8,14 +8,11 @@ import {
   MiuixProgressIndicator,
   MiuixSnackbarHost,
   showSnackbar,
-  setThemeMode,
 } from 'miuix-vue'
 import { All, Settings, Tune } from 'miuix-vue/icons'
-import { AppList, type AppListSnapshot } from '../app_list/app_list'
-import { appearance } from '../appearance'
+import { afterPaint, AppList, type AppListSnapshot } from '../app_list/app_list'
 import {
   Cli,
-  type ActivityEntry,
   type DiagnosticsState,
   type KeyboxInspector,
   type KeyboxRevocationStatus,
@@ -30,6 +27,7 @@ import HomeView, { type KeyboxStatus, type ModuleStatus, type TeeStatus } from '
 import PifFingerprintDialog from './PifFingerprintDialog.vue'
 import SettingsView from './SettingsView.vue'
 import SoterDialog from './SoterDialog.vue'
+import SoterHalDialog from './SoterHalDialog.vue'
 import TargetsView from './TargetsView.vue'
 import ToolsView, { type ToolEvent } from './ToolsView.vue'
 import FileBrowserSheet from './FileBrowserSheet.vue'
@@ -46,23 +44,25 @@ const pageDirection = ref(1)
 const pageScrollPositions = [0, 0, 0]
 const targetsOpen = ref(false)
 const targetsLoading = ref(false)
+const targetsRefreshing = ref(false)
 const snapshot = ref<AppListSnapshot>(appList.getSnapshot())
 const moduleStatus = ref<ModuleStatus>('loading')
 const keyboxStatus = ref<KeyboxStatus>('loading')
 const keyboxSource = ref<'google_hardware' | 'google_remote' | 'unknown'>('unknown')
 const keyboxLevel = ref<'tee' | 'strongbox' | 'unknown'>('unknown')
 const keyboxRevocation = ref<KeyboxRevocationStatus>('not_checked')
-const keyboxInspector = ref<KeyboxInspector | null>(null)
-const diagnostics = ref<DiagnosticsState | null>(null)
+const keyboxInspector = shallowRef<KeyboxInspector | null>(null)
+const diagnostics = shallowRef<DiagnosticsState | null>(null)
 const diagnosticsStatus = ref<'loading' | 'ready' | 'error'>('loading')
 const teeStatus = ref<TeeStatus>('loading')
 const securityPatch = ref<string | null>(null)
 const spoofedDevice = ref<string | null | undefined>(undefined)
-const activities = ref<ActivityEntry[]>([])
-const activityStatus = ref<'loading' | 'ready' | 'error'>('loading')
-const activityClearBusy = ref(false)
 const securityPatchBusy = ref<'sync' | 'restore' | null>(null)
+const maintenanceBusy = ref<'gms' | 'rkp' | null>(null)
+const rkpOpen = ref(false)
+const rkpError = ref('')
 const soterOpen = ref(false)
+const soterHalOpen = ref(false)
 const pifOpen = ref(false)
 const keyboxOpen = ref(false)
 const selectedKeybox = ref<{ name: string, contents: Uint8Array } | null>(null)
@@ -71,6 +71,7 @@ const targetsView = ref<InstanceType<typeof TargetsView> | null>(null)
 const settingsView = ref<InstanceType<typeof SettingsView> | null>(null)
 const pifDialog = ref<InstanceType<typeof PifFingerprintDialog> | null>(null)
 const soterDialog = ref<InstanceType<typeof SoterDialog> | null>(null)
+const soterHalDialog = ref<InstanceType<typeof SoterHalDialog> | null>(null)
 
 const pageIds = ['home', 'tools', 'settings'] as const
 const navItems = computed(() => [
@@ -81,7 +82,6 @@ const navItems = computed(() => [
 
 let unsubscribeAppList: (() => void) | null = null
 let unsubscribeFileSelector: (() => void) | null = null
-let unsubscribeAppearance: (() => void) | null = null
 let keydownListener: ((event: KeyboardEvent) => void) | null = null
 let pageHistoryActive = false
 const overlayHistory = new Set<string>()
@@ -91,6 +91,10 @@ let navigationPointerId: number | null = null
 let navigationPointerStartX = 0
 let navigationPointerStartIndex = 0
 let navigationPointerSlotWidth = 1
+let navigationPointerLeft = 0
+let navigationPointerWidth = 1
+let navigationPointerX = 0
+let navigationFrame: number | null = null
 let navigationWasDragged = false
 let navigationSuppressClick = false
 
@@ -106,24 +110,22 @@ function clampNavigationIndex(index: number): number {
   return Math.max(0, Math.min(pageIds.length - 1, index))
 }
 
-function navigationPosition(clientX: number): number {
-  if (!navigationElement) return pageIndex.value
-  const bounds = navigationElement.getBoundingClientRect()
-  const slot = Math.max(1, (bounds.width - 8) / pageIds.length)
-  return clampNavigationIndex((clientX - bounds.left - 4) / slot)
-}
-
 function onNavigationPointerDown(event: PointerEvent): void {
   if (!navigationElement || !floatingNavigationEnabled() || !event.isPrimary || event.button !== 0
       || navigationPointerId !== null) return
   const bounds = navigationElement.getBoundingClientRect()
+  navigationPointerLeft = bounds.left
+  navigationPointerWidth = Math.max(1, bounds.width)
   navigationPointerSlotWidth = Math.max(
     1,
     (bounds.width - 8) / pageIds.length,
   )
   navigationPointerId = event.pointerId
   navigationPointerStartX = event.clientX
-  navigationPointerStartIndex = Math.floor(navigationPosition(event.clientX))
+  navigationPointerX = event.clientX
+  navigationPointerStartIndex = Math.floor(clampNavigationIndex(
+    (event.clientX - navigationPointerLeft - 4) / navigationPointerSlotWidth,
+  ))
   navigationWasDragged = false
   navigationElement.classList.add('is-pressing')
   navigationElement.style.setProperty('--omk-liquid-nav-index', String(navigationPointerStartIndex))
@@ -139,27 +141,37 @@ function onNavigationPointerDown(event: PointerEvent): void {
 
 function onNavigationPointerMove(event: PointerEvent): void {
   if (!navigationElement || navigationPointerId !== event.pointerId) return
+  navigationPointerX = event.clientX
   if (Math.abs(event.clientX - navigationPointerStartX) > 1) {
-    navigationElement.classList.add('is-dragging')
     navigationWasDragged = true
   }
+  // A gesture only paints once per display frame. Use the geometry captured
+  // before pressing, not a layout read after moving the floating surface.
+  if (navigationFrame === null) navigationFrame = window.requestAnimationFrame(paintNavigationDrag)
+  event.preventDefault()
+}
+
+function paintNavigationDrag(): void {
+  navigationFrame = null
+  if (!navigationElement || navigationPointerId === null) return
+  if (navigationWasDragged) navigationElement.classList.add('is-dragging')
   const position = navigationPointerStartIndex
-    + (event.clientX - navigationPointerStartX) / navigationPointerSlotWidth
+    + (navigationPointerX - navigationPointerStartX) / navigationPointerSlotWidth
   navigationElement.style.setProperty('--omk-liquid-nav-index', String(clampNavigationIndex(position)))
-  const bounds = navigationElement.getBoundingClientRect()
-  const distance = event.clientX - navigationPointerStartX
-  const fraction = Math.min(1, Math.abs(distance) / Math.max(1, bounds.width))
+  const distance = navigationPointerX - navigationPointerStartX
+  const fraction = Math.min(1, Math.abs(distance) / navigationPointerWidth)
   const rubberBand = Math.sign(distance) * 4 * (1 - (1 - fraction) ** 2)
   navigationElement.style.setProperty('--omk-liquid-nav-panel-offset', `${rubberBand}px`)
   navigationElement.style.setProperty(
     '--omk-liquid-nav-highlight-x',
-    `${event.clientX - bounds.left}px`,
+    `${navigationPointerX - navigationPointerLeft}px`,
   )
-  event.preventDefault()
 }
 
 function onNavigationPointerUp(event: PointerEvent): void {
   if (!navigationElement || navigationPointerId !== event.pointerId) return
+  if (navigationFrame !== null) window.cancelAnimationFrame(navigationFrame)
+  navigationFrame = null
   const target = navigationWasDragged
     ? Math.round(clampNavigationIndex(navigationPointerStartIndex
       + (event.clientX - navigationPointerStartX) / navigationPointerSlotWidth))
@@ -187,6 +199,8 @@ function onNavigationClickCapture(event: Event): void {
 
 function onNavigationPointerCancel(event: PointerEvent): void {
   if (!navigationElement || navigationPointerId !== event.pointerId) return
+  if (navigationFrame !== null) window.cancelAnimationFrame(navigationFrame)
+  navigationFrame = null
   navigationPointerId = null
   navigationWasDragged = false
   navigationSuppressClick = false
@@ -220,7 +234,7 @@ function openTargets(): void {
   if (targetsOpen.value) return
   targetsOpen.value = true
   history.push('app-targets', () => { targetsOpen.value = false })
-  window.setTimeout(() => { if (targetsOpen.value) void reloadApps(false) }, 220)
+  window.setTimeout(() => { if (targetsOpen.value) void reloadApps() }, 220)
 }
 
 function closeTargets(): void {
@@ -246,7 +260,7 @@ function scheduleTargetsRefresh(): void {
   targetsRefreshTimer = window.setTimeout(() => {
     targetsRefreshTimer = null
     if (targetsOpen.value && document.visibilityState === 'visible' && !targetsLoading.value) {
-      void reloadApps(false)
+      void reloadApps()
     }
   }, 180)
 }
@@ -284,14 +298,19 @@ function onTargetsOverlayClose(): void {
 
 function handleEscape(): void {
   if (soterOpen.value && soterDialog.value?.busy) return
+  if (soterHalOpen.value && soterHalDialog.value?.busy) return
   if (targetsOpen.value && targetsView.value?.dismissOverlay()) return
   if (history.size > 0) history.back()
 }
 
-async function reloadApps(readConfig: boolean): Promise<void> {
+async function reloadApps(): Promise<void> {
+  if (targetsLoading.value) return
+  targetsRefreshing.value = appList.getEntries().length > 0
   targetsLoading.value = true
   try {
-    if (readConfig) await config.read()
+    // Present the refresh state before entering the synchronous WebView bridge.
+    await afterPaint()
+    await config.refresh()
     await appList.fetch()
     snapshot.value = appList.getSnapshot()
     moduleStatus.value = config.isWritable ? 'ready' : 'error'
@@ -300,11 +319,13 @@ async function reloadApps(readConfig: boolean): Promise<void> {
     console.error('Unable to load OMK configuration:', error)
     notify(i18n.t('prompt_load_error'), true)
   } finally {
+    targetsRefreshing.value = false
     targetsLoading.value = false
   }
 }
 
 async function saveTargets(): Promise<void> {
+  if (targetsLoading.value) return
   targetsLoading.value = true
   try {
     await appList.save()
@@ -352,6 +373,7 @@ async function refreshIdentity(force = false): Promise<void> {
     return
   }
   try {
+    await afterPaint()
     const [keybox, patch, tee, pif] = await Promise.allSettled([
       cli.getKeyboxState(),
       cli.getSystemSecurityPatch(),
@@ -364,10 +386,6 @@ async function refreshIdentity(force = false): Promise<void> {
       keyboxSource.value = value.source
       keyboxLevel.value = value.level
       keyboxRevocation.value = value.valid ? 'checking' : value.revocation
-      if (value.valid) {
-        try { keyboxRevocation.value = await cli.checkKeyboxRevocation() }
-        catch { keyboxRevocation.value = 'unknown' }
-      }
     } else keyboxStatus.value = 'error'
     if (patch.status === 'fulfilled') securityPatch.value = patch.value
     if (tee.status === 'fulfilled') teeStatus.value = 'normal'
@@ -376,6 +394,11 @@ async function refreshIdentity(force = false): Promise<void> {
       spoofedDevice.value = pif.value.enabled
         ? (/^google\s/i.test(pif.value.model) ? pif.value.model : `Google ${pif.value.model}`)
         : null
+    }
+    // Network revocation checks must not delay the other local status fields.
+    if (keybox.status === 'fulfilled' && keybox.value.valid) {
+      try { keyboxRevocation.value = await cli.checkKeyboxRevocation() }
+      catch { keyboxRevocation.value = 'unknown' }
     }
   } catch (error) {
     console.error('Unable to load OMK identity:', error)
@@ -389,6 +412,7 @@ async function refreshDiagnostics(): Promise<void> {
       keymint: { status: 'running', pid: 1234 },
       keystore2: { status: 'running', pid: 1240 },
       injector: { status: 'running', pid: 1250 },
+      soter: { status: 'configured', pid: null },
       tee: { status: 'available', version: 300, name: 'TEE KeyMint' },
       strongbox: { status: 'unavailable', version: null, name: null },
       rkp_tee: { status: 'available', pid: null },
@@ -399,6 +423,7 @@ async function refreshDiagnostics(): Promise<void> {
     return
   }
 
+  await afterPaint()
   const [inspector, state] = await Promise.allSettled([
     cli.getKeyboxInspector(),
     cli.getDiagnostics(),
@@ -410,22 +435,6 @@ async function refreshDiagnostics(): Promise<void> {
   } else {
     diagnosticsStatus.value = 'error'
     console.error('Unable to load OMK service diagnostics:', state.reason)
-  }
-}
-
-async function refreshActivity(): Promise<void> {
-  try {
-    activities.value = (await cli.getActivityLog()).slice().sort((left, right) => right.timestamp - left.timestamp)
-    activityStatus.value = 'ready'
-  } catch (error) {
-    if (isDev()) {
-      const now = Math.floor(Date.now() / 1000)
-      activities.value = [{ action: 'keybox_changed', detail: '', timestamp: now - 3600 }]
-      activityStatus.value = 'ready'
-    } else {
-      activityStatus.value = 'error'
-      console.error('Unable to load activity:', error)
-    }
   }
 }
 
@@ -450,7 +459,7 @@ async function installKeybox(): Promise<void> {
     notify(i18n.t('prompt_keybox_replaced'))
     keyboxOpen.value = false
     selectedKeybox.value = null
-    await Promise.all([refreshIdentity(true), refreshDiagnostics(), refreshActivity()])
+    await Promise.all([refreshIdentity(true), refreshDiagnostics()])
   } catch (error) {
     notify(i18n.t('prompt_keybox_replace_error', error instanceof Error ? error.message : String(error)), true)
   } finally {
@@ -472,11 +481,47 @@ async function syncPatch(restore: boolean): Promise<void> {
       securityPatch.value = applied
       notify(i18n.t('prompt_security_patch_sync_complete', applied))
     }
-    await refreshActivity()
   } catch (error) {
     notify(error instanceof Error ? error.message : String(error), true)
   } finally {
     securityPatchBusy.value = null
+  }
+}
+
+async function clearGmsCache(): Promise<void> {
+  if (maintenanceBusy.value !== null) return
+  maintenanceBusy.value = 'gms'
+  try {
+    if (isDev()) {
+      notify(i18n.t('maintenance_preview_only'))
+      return
+    }
+    await cli.clearGmsCache()
+    notify(i18n.t('gms_cache_cleared'))
+  } catch (error) {
+    notify(error instanceof Error ? error.message : String(error), true)
+  } finally {
+    maintenanceBusy.value = null
+  }
+}
+
+async function repairRkp(): Promise<void> {
+  if (maintenanceBusy.value !== null) return
+  maintenanceBusy.value = 'rkp'
+  rkpError.value = ''
+  try {
+    if (isDev()) {
+      notify(i18n.t('maintenance_preview_only'))
+      return
+    }
+    await cli.repairRkp()
+    notify(i18n.t('rkp_tool_completed'))
+    rkpOpen.value = false
+  } catch (error) {
+    rkpError.value = error instanceof Error ? error.message : String(error)
+    notify(rkpError.value, true)
+  } finally {
+    maintenanceBusy.value = null
   }
 }
 
@@ -487,30 +532,14 @@ function onTool(event: ToolEvent): void {
     case 'syncSecurityPatch': void syncPatch(false); break
     case 'restoreSecurityPatch': void syncPatch(true); break
     case 'openSoterBeta': soterOpen.value = true; break
+    case 'openSoterHal': soterHalOpen.value = true; break
     case 'spoofPif': pifOpen.value = true; break
-  }
-}
-
-async function clearActivities(): Promise<void> {
-  if (activityClearBusy.value) return
-  activityClearBusy.value = true
-  try {
-    if (!isDev()) await cli.clearActivityLog()
-    activities.value = []
-    notify(i18n.t('home_activity_cleared'))
-  } catch (error) {
-    notify(error instanceof Error ? error.message : String(error), true)
-  } finally {
-    activityClearBusy.value = false
+    case 'clearGmsCache': void clearGmsCache(); break
+    case 'repairRkp': rkpError.value = ''; rkpOpen.value = true; break
   }
 }
 
 onMounted(async () => {
-  const applyMiuixTheme = (): void => {
-    const mode = appearance.mode === 'auto' ? 'system' : appearance.mode === 'amoled' ? 'dark' : appearance.mode
-    setThemeMode(mode)
-  }
-  applyMiuixTheme()
   navigationElement = document.querySelector<HTMLElement>('.main-navigation')
   navigationElement?.style.setProperty('--omk-liquid-nav-index', String(pageIndex.value))
   navigationElement?.style.setProperty('--omk-liquid-nav-scale', '1')
@@ -519,7 +548,6 @@ onMounted(async () => {
   navigationElement?.addEventListener('pointerup', onNavigationPointerUp)
   navigationElement?.addEventListener('pointercancel', onNavigationPointerCancel)
   navigationElement?.addEventListener('click', onNavigationClickCapture, true)
-  unsubscribeAppearance = appearance.onChange(applyMiuixTheme)
   keydownListener = event => {
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -538,10 +566,14 @@ onMounted(async () => {
       history.consume('file-selector')
     }
   })
-  await Promise.all([reloadApps(true), refreshIdentity(), refreshDiagnostics(), refreshActivity()])
+  // Package enumeration is only needed when the picker opens. In particular,
+  // do not call the synchronous Android package bridge during home startup.
+  await Promise.all([refreshIdentity(), refreshDiagnostics()])
 })
 
 onBeforeUnmount(() => {
+  if (navigationFrame !== null) window.cancelAnimationFrame(navigationFrame)
+  navigationFrame = null
   if (targetsRefreshTimer !== null) {
     window.clearTimeout(targetsRefreshTimer)
     targetsRefreshTimer = null
@@ -557,7 +589,6 @@ onBeforeUnmount(() => {
   navigationElement = null
   unsubscribeAppList?.()
   unsubscribeFileSelector?.()
-  unsubscribeAppearance?.()
   history.destroy()
 })
 
@@ -609,11 +640,37 @@ watch(soterOpen, open => {
   if (open) trackSoterOverlay()
   else if (overlayHistory.delete('soter-beta')) history.consume('soter-beta')
 })
+function trackSoterHalOverlay(): void {
+  const key = 'soter-hal'
+  if (!soterHalOpen.value || overlayHistory.has(key)) return
+  overlayHistory.add(key)
+  history.push(key, () => {
+    overlayHistory.delete(key)
+    if (soterHalDialog.value?.requestClose() === false) void nextTick(trackSoterHalOverlay)
+  })
+}
+watch(soterHalOpen, open => {
+  if (open) trackSoterHalOverlay()
+  else if (overlayHistory.delete('soter-hal')) history.consume('soter-hal')
+})
 watch(keyboxOpen, open => {
   if (open && !overlayHistory.has('keybox')) {
     overlayHistory.add('keybox')
     history.push('keybox', () => { if (!keyboxBusy.value) keyboxOpen.value = false })
   } else if (!open && overlayHistory.delete('keybox')) history.consume('keybox')
+})
+function trackRkpOverlay(): void {
+  if (!rkpOpen.value || overlayHistory.has('rkp')) return
+  overlayHistory.add('rkp')
+  history.push('rkp', () => {
+    overlayHistory.delete('rkp')
+    if (maintenanceBusy.value === 'rkp') void nextTick(trackRkpOverlay)
+    else rkpOpen.value = false
+  })
+}
+watch(rkpOpen, open => {
+  if (open) trackRkpOverlay()
+  else if (overlayHistory.delete('rkp')) history.consume('rkp')
 })
 </script>
 
@@ -633,23 +690,23 @@ watch(keyboxOpen, open => {
           :tee-status="teeStatus"
           :security-patch="securityPatch"
           :spoofed-device="spoofedDevice"
-          :activities="activities"
-          :activity-status="activityStatus"
-          :activity-clear-busy="activityClearBusy"
           @refresh-diagnostics="refreshDiagnostics"
-          @clear-activities="clearActivities"
         />
       </Transition>
       <Transition name="page-switch">
         <ToolsView
           v-show="pageIndex === 1"
           :security-patch-busy="securityPatchBusy"
+          :maintenance-busy="maintenanceBusy"
           @open-app-targets="onTool('openAppTargets')"
           @install-keybox="onTool('installKeybox')"
           @sync-security-patch="onTool('syncSecurityPatch')"
           @restore-security-patch="onTool('restoreSecurityPatch')"
           @open-soter-beta="onTool('openSoterBeta')"
+          @open-soter-hal="onTool('openSoterHal')"
           @spoof-pif="onTool('spoofPif')"
+          @clear-gms-cache="onTool('clearGmsCache')"
+          @repair-rkp="onTool('repairRkp')"
         />
       </Transition>
       <Transition name="page-switch">
@@ -685,9 +742,10 @@ watch(keyboxOpen, open => {
         :app-list="appList"
         :cli="cli"
         :loading="targetsLoading"
+        :refreshing="targetsRefreshing"
         :apply-enabled="snapshot.isWritable"
         @close="closeTargets"
-        @refresh="reloadApps(false)"
+        @refresh="reloadApps"
         @apply="saveTargets"
         @overlay-open="onTargetsOverlayOpen"
         @overlay-close="onTargetsOverlayClose"
@@ -722,9 +780,30 @@ watch(keyboxOpen, open => {
       v-model="pifOpen"
       :cli="cli"
       @notify="notify"
-      @changed="refreshIdentity(true); refreshActivity()"
+      @changed="refreshIdentity(true)"
     />
+    <MiuixDialog
+      :model-value="rkpOpen"
+      :title="i18n.t('tools_repair_rkp')"
+      :close-on-click-modal="maintenanceBusy !== 'rkp'"
+      @update:model-value="value => { if (maintenanceBusy !== 'rkp') rkpOpen = value }"
+    >
+      <div class="confirm-sheet">
+        <p>{{ i18n.t('rkp_repair_warning') }}</p>
+        <p v-if="rkpError" role="alert">{{ rkpError }}</p>
+        <div class="confirm-actions">
+          <MiuixButton :disabled="maintenanceBusy === 'rkp'" @click="rkpOpen = false">
+            {{ i18n.t('functional_button_cancel') }}
+          </MiuixButton>
+          <MiuixButton type="primary" :disabled="maintenanceBusy !== null" @click="repairRkp">
+            <MiuixProgressIndicator v-if="maintenanceBusy === 'rkp'" type="circular" :size="18" />
+            {{ i18n.t('rkp_repair_confirm') }}
+          </MiuixButton>
+        </div>
+      </div>
+    </MiuixDialog>
     <SoterDialog ref="soterDialog" v-model="soterOpen" :cli="cli" @notify="notify" />
+    <SoterHalDialog ref="soterHalDialog" v-model="soterHalOpen" :cli="cli" @notify="notify" />
     <MiuixSnackbarHost />
   </div>
 </template>

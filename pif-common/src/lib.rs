@@ -2,12 +2,17 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+pub mod soter;
+#[cfg(feature = "soter-crypto")]
+pub mod soter_blob;
+
 pub const MAX_CATALOG_BYTES: usize = 64 * 1024;
 pub const MAX_CATALOG_ENTRIES: usize = 64;
 pub const MAX_PROP_BYTES: usize = 4 * 1024;
 pub const MAX_PROFILE_BYTES: usize = 4 * 1024;
 pub const MAX_VALUE_BYTES: usize = 126;
 pub const PROFILE_VERSION: u32 = 2;
+pub const DEFAULT_INITIAL_SDK_INT: i32 = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +37,8 @@ pub struct PifProfile {
     pub build_type: String,
     pub tags: String,
     pub security_patch: String,
-    pub device_initial_sdk_int: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_initial_sdk_int: Option<i32>,
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
     pub spoof_build: bool,
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
@@ -59,7 +65,7 @@ struct SourceProfile {
     manufacturer: String,
     model: String,
     security_patch: String,
-    device_initial_sdk_int: u32,
+    device_initial_sdk_int: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,13 +133,20 @@ impl PifProfile {
         Ok(profile)
     }
 
-    pub fn initial_sdk_int(&self) -> i32 {
-        self.device_initial_sdk_int as i32
-    }
-
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != PROFILE_VERSION {
+        if !matches!(self.version, 1 | PROFILE_VERSION) {
             return Err(format!("unsupported PIF profile version {}", self.version));
+        }
+        if self.version == 1
+            && (self.device_initial_sdk_int.is_some()
+                || !self.spoof_build
+                || !self.spoof_props
+                || self.spoof_vending_build)
+        {
+            return Err("extended PIF settings require profile version 2".to_string());
+        }
+        if self.device_initial_sdk_int.is_some_and(|sdk| sdk <= 0) {
+            return Err("DEVICE_INITIAL_SDK_INT must be a positive 32-bit integer".to_string());
         }
         validate_display_value("model", &self.model)?;
         validate_product(&self.product)?;
@@ -163,9 +176,6 @@ impl PifProfile {
         if self.build_type != "user" || self.tags != "release-keys" {
             return Err("stored fingerprint must describe a user/release-keys build".to_string());
         }
-        if !(16..=100).contains(&self.device_initial_sdk_int) {
-            return Err("stored DEVICE_INITIAL_SDK_INT is outside the supported range".to_string());
-        }
         Ok(())
     }
 
@@ -187,6 +197,11 @@ impl PifProfile {
             .map_err(|error| format!("invalid PIF profile JSON: {error}"))?;
         profile.validate()?;
         Ok(profile)
+    }
+
+    pub fn initial_sdk_int(&self) -> i32 {
+        self.device_initial_sdk_int
+            .unwrap_or(DEFAULT_INITIAL_SDK_INT)
     }
 
     pub fn build_fields(&self) -> [(&'static str, &'_ str, BuildClass); 12] {
@@ -299,6 +314,17 @@ fn parse_source_profile(contents: &[u8]) -> Result<SourceProfile, String> {
         }
     }
 
+    let device_initial_sdk_int = if let Some(value) = device_initial_sdk_int {
+        if !value.bytes().all(|byte| byte.is_ascii_digit())
+            || !matches!(value.parse::<i32>(), Ok(sdk) if sdk > 0)
+        {
+            return Err("DEVICE_INITIAL_SDK_INT must be a positive 32-bit integer".to_string());
+        }
+        Some(value.parse::<i32>().map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+
     let source = SourceProfile {
         fingerprint: fingerprint
             .ok_or_else(|| "PIF source profile lacks FINGERPRINT".to_string())?,
@@ -307,10 +333,7 @@ fn parse_source_profile(contents: &[u8]) -> Result<SourceProfile, String> {
         model: model.ok_or_else(|| "PIF source profile lacks MODEL".to_string())?,
         security_patch: security_patch
             .ok_or_else(|| "PIF source profile lacks SECURITY_PATCH".to_string())?,
-        device_initial_sdk_int: device_initial_sdk_int
-            .ok_or_else(|| "PIF source profile lacks DEVICE_INITIAL_SDK_INT".to_string())?
-            .parse::<u32>()
-            .map_err(|_| "DEVICE_INITIAL_SDK_INT must be a positive integer".to_string())?,
+        device_initial_sdk_int,
     };
     validate_display_value("MANUFACTURER", &source.manufacturer)?;
     validate_display_value("MODEL", &source.model)?;
@@ -423,7 +446,7 @@ fn validate_security_patch_date(value: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const PROP: &str = "FINGERPRINT=google/oriole_beta/oriole:CANARY/ZP11.260717.006/16004061:user/release-keys\nMANUFACTURER=Google\nMODEL=Pixel 6\nSECURITY_PATCH=2026-08-05\nDEVICE_INITIAL_SDK_INT=32\n";
+    const PROP: &str = "FINGERPRINT=google/oriole_beta/oriole:CANARY/ZP11.260717.006/16004061:user/release-keys\nMANUFACTURER=Google\nMODEL=Pixel 6\nSECURITY_PATCH=2026-08-05\n";
 
     fn selected() -> DeviceEntry {
         DeviceEntry {
@@ -477,35 +500,7 @@ mod tests {
         assert_eq!(profile.incremental, "16004061");
         assert_eq!(profile.build_type, "user");
         assert_eq!(profile.tags, "release-keys");
-        assert_eq!(profile.device_initial_sdk_int, 32);
         assert_eq!(profile.build_fields().len(), 12);
-    }
-
-    #[test]
-    fn device_initial_sdk_int_must_be_present_and_bounded() {
-        let without = PROP.replace("DEVICE_INITIAL_SDK_INT=32\n", "");
-        assert!(PifProfile::from_source(&selected(), without.as_bytes()).is_err());
-        for invalid in ["", "abc", "0", "15", "101", "-1", "1.5"] {
-            let prop = PROP.replace(
-                "DEVICE_INITIAL_SDK_INT=32",
-                &format!("DEVICE_INITIAL_SDK_INT={invalid}"),
-            );
-            assert!(
-                PifProfile::from_source(&selected(), prop.as_bytes()).is_err(),
-                "{invalid}"
-            );
-        }
-        for valid in ["16", "33", "100"] {
-            let prop = PROP.replace(
-                "DEVICE_INITIAL_SDK_INT=32",
-                &format!("DEVICE_INITIAL_SDK_INT={valid}"),
-            );
-            let profile = PifProfile::from_source(&selected(), prop.as_bytes()).unwrap();
-            assert_eq!(
-                profile.device_initial_sdk_int,
-                valid.parse::<u32>().unwrap()
-            );
-        }
     }
 
     #[test]
@@ -519,6 +514,45 @@ mod tests {
         ] {
             assert!(PifProfile::from_source(&selected(), malformed.as_bytes()).is_err());
         }
+    }
+
+    #[test]
+    fn source_profile_preserves_optional_launch_sdk() {
+        let default = PifProfile::from_source(&selected(), PROP.as_bytes()).unwrap();
+        assert_eq!(default.initial_sdk_int(), 32);
+        for sdk in ["21", "32", "34", "37"] {
+            let source = format!("{PROP}DEVICE_INITIAL_SDK_INT={sdk}\n");
+            for source in [source.clone(), source.replace('\n', "\r\n")] {
+                let profile = PifProfile::from_source(&selected(), source.as_bytes()).unwrap();
+                assert_eq!(profile.device_initial_sdk_int, Some(sdk.parse().unwrap()));
+                assert_eq!(profile.initial_sdk_int(), sdk.parse::<i32>().unwrap());
+                assert_eq!(
+                    PifProfile::from_json(profile.to_canonical_json().unwrap().as_bytes()).unwrap(),
+                    profile
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_profiles_remain_canonical_and_default_to_enabled_paths() {
+        let mut legacy = PifProfile::from_source(&selected(), PROP.as_bytes()).unwrap();
+        legacy.version = 1;
+        let json = legacy.to_canonical_json().unwrap();
+        assert!(!json.contains("device_initial_sdk_int"));
+        assert!(!json.contains("spoof_build"));
+        assert!(!json.contains("spoof_props"));
+        assert!(!json.contains("spoof_vending_build"));
+        let loaded = PifProfile::from_json(json.as_bytes()).unwrap();
+        assert_eq!(loaded.to_canonical_json().unwrap(), json);
+        assert!(loaded.spoof_build && loaded.spoof_props);
+        assert!(!loaded.spoof_vending_build);
+        assert_eq!(loaded.initial_sdk_int(), 32);
+        legacy.spoof_props = false;
+        assert!(legacy.validate().is_err());
+        legacy.spoof_props = true;
+        legacy.spoof_vending_build = true;
+        assert!(legacy.validate().is_err());
     }
 
     #[test]

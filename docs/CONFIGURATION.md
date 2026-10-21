@@ -118,7 +118,7 @@ validation and upgrade rules for existing keys.
 ## Embedded WebUI
 
 The module includes a WebUI for selecting packages in `scoop`, installing a
-local keybox, managing global and per-application Android security patch levels, applying a Pixel
+local keybox, managing global Android security patch levels, applying a Pixel
 PIF fingerprint through OMK's own Zygisk payload, and independently enabling
 Tencent Soter compatibility (Beta). Open it from the Oh My Keymint module page in
 KernelSU. With Magisk, open an installed KSUWebUIStandalone or WebUI X host and
@@ -129,6 +129,18 @@ including Android overlays, are managed through **More > Add system apps**.
 Classification uses Android's package-manager list even when the WebUI host
 cannot provide an application's label or metadata. Hiding system applications
 from the main list does not remove their saved routing selections.
+
+The home page loads its status and diagnostics without enumerating installed
+applications; package discovery starts when the package picker opens. Dialogs
+present their loading state before querying the device. Long device, language,
+and file lists mount in stages, and closing a panel discards pending read results.
+The PIF device catalog loads only when fingerprint spoofing is selected in its
+panel; inspecting a disabled profile does not download the catalog. Loading
+panels reserve their content space while the opening animation runs.
+Navigation drags are coalesced to display frames without repeated layout reads.
+Certificate presentation is cached until its source snapshot changes, and a
+diagnostic refresh retains the current rows while it loads. System-color refreshes
+reuse an unchanged palette and update only changed color overrides.
 
 The Settings page keeps the selected language, theme mode, accent, and visual
 effects in the WebUI's local storage. Language selection opens a height-limited
@@ -157,14 +169,19 @@ the bar's size without scaling the host's safe-area spacing. Top and side
 safe areas also retain their physical size at every interface scale. Scroll
 clearance follows the actual navigation height and bottom offset, so the last
 item can be scrolled fully above the bar.
+With blurred non-floating navigation, its bottom gesture safe area also paints
+the navigation surface: blurred when supported, otherwise opaque.
+This safe-area surface is not scaled with the navigation controls.
 
 Native status and navigation bar icons are controlled by the WebUI host.
 The WebUI enables edge-to-edge layout and extends its surface behind the system
 bars when the host and content use matching light/dark modes. When the modes
-differ, only the system safe areas use the host surface from
+differ, the system safe areas use the host surface from
 `/internal/colors.css` to preserve icon contrast. Hosts without this endpoint
 use the WebView's system color preference for this fallback. System bars remain
 visible; this does not change the host or Android theme settings.
+Blurred non-floating navigation keeps its own surface through the bottom
+gesture area so there is no contrasting strip below the navigation controls.
 
 The Home page reads each identity item independently. The Keybox card parses
 the installed XML and checks the private key against its leaf certificate
@@ -212,24 +229,16 @@ does not prove that Play Integrity will accept the Keybox. When a refresh is
 due, an unavailable endpoint falls back to the last validated cache and then
 the bundled snapshot.
 
-The Home page also keeps the 30 most recent successful WebUI changes in
-`/data/misc/keystore/omk/data/webui_activity.json`. The list covers saved app
-targets, Keybox changes, security-patch synchronization and restore, and PIF
-enable or disable actions. It
-stores only the action type, a short non-secret result such as an entry count,
-patch date, or Pixel model, and the completion time. It never stores
-package-name lists, Keybox contents or filenames, downloaded response bodies, or
-a PIF fingerprint. The Home page initially shows the newest four entries, can expand
-the complete retained list, and provides controls to copy an entry or clear the
-activity file. Activity recording is supplementary: failure to update this file
-does not change the result of a completed WebUI operation.
+The WebUI does not display or clear a recent-activity history. Existing activity
+files from older installations are ignored by the current interface.
 
-The Home page exposes read-only runtime diagnostics for OMK KeyMint, keystore2,
-the injector, the registered TEE and StrongBox KeyMint services, and the matching
-`default` and `strongbox` RKP Binder services. A missing optional StrongBox service
-is shown as unregistered. These checks do not issue an attestation challenge,
-contact an RKP provisioning server, or certify hardware-backed operation. A vendor
-KeyMint process is not used as evidence that OMK itself is running. The Keybox inspector shows public
+The Home page exposes read-only runtime diagnostics for OMK KeyMint,
+Soter, the registered TEE and StrongBox KeyMint services, and the matching
+`default` and `strongbox` RKP Binder services. A missing
+optional StrongBox service is shown as unregistered. These checks do not issue
+an attestation challenge, contact an RKP provisioning server, or certify
+hardware-backed operation. A vendor KeyMint process is not used as evidence
+that OMK itself is running. The Keybox inspector shows public
 certificate-chain metadata (algorithm and chain length) and each certificate's
 subject, validity dates, and serial number without exposing private
 keys or relay credentials. The expandable chain view presents the root first,
@@ -296,16 +305,26 @@ script and does not require a device-provided `curl`, `wget`, or shell download
 tool.
 
 The native helper accepts only the fixed feed paths, validates every catalog
-entry, requires exactly `FINGERPRINT`, `MANUFACTURER`, `MODEL`,
-`SECURITY_PATCH`, and `DEVICE_INITIAL_SDK_INT` in a profile, and splits the
-fingerprint into its eight Build components. Unknown keys, duplicate keys, and
-missing required fields are rejected; the launch SDK must be a decimal integer
-between 16 and 100. Native property spoofing uses that value for
+entry, requires `FINGERPRINT`, `MANUFACTURER`, `MODEL`, and `SECURITY_PATCH`
+in a profile, and accepts optional `DEVICE_INITIAL_SDK_INT` launch-SDK metadata
+as a positive 32-bit decimal integer. Unknown keys, duplicate keys, and missing
+required fields are rejected. The launch-SDK metadata is retained in the profile;
+when absent, the product's initial API level defaults to `32`, following
+PlayIntegrityFix `v4.9-inject-s`. Native property spoofing uses that value for
 `ro.product.first_api_level` and `32` for `ro.board.first_api_level`, without
 overriding other API-level properties. GMS Build spoofing writes the same
 launch-SDK value to the integer `Build.VERSION.DEVICE_INITIAL_SDK_INT` field.
 It does not change `Build.VERSION.SDK_INT`.
-The helper stores the following values in canonical JSON only after they agree
+When Java Build spoofing is enabled, `Build.IS_ENG`, `Build.IS_USERDEBUG`,
+and `Build.IS_USER` are synchronized with the selected `Build.TYPE`. All
+written strings, type flags, and the GMS launch SDK are read back before the
+payload reports a verified Java update. A failed JNI operation is logged and
+its pending exception is cleared; an exception already pending before the
+update is preserved and the update is skipped. Java writes are sequential;
+on failure, fields already written remain applied and the payload does not
+report a verified update.
+The helper splits the fingerprint into its eight Build components. It stores
+the following values in canonical JSON only after they agree
 with one another and satisfy TrickyStore's value limits:
 
 ```text
@@ -329,13 +348,14 @@ failed write leaves the previous profile unchanged. The WebUI controls Java
 Build spoofing and native property spoofing independently for Google Play
 services through **Spoof Build** and **Spoof Props**; both default to on.
 A separate **Spoof Build (Play Store)** switch defaults to off and applies all
-12 string fields listed above inside the Play Store, including model, product,
-device, fingerprint, release, build ID, and security patch. It does not change
-the store's launch SDK, running SDK, or native properties, and is independent
+12 string fields listed above and the three derived type flags inside the Play
+Store, including model, product, device, fingerprint, release, build ID, and
+security patch. It does not change the store's launch SDK, running SDK, or
+native properties, and is independent
 of the two GMS switches. All three switches can be enabled together.
 Changes take effect only after Apply succeeds. Turning off the main switch
-removes the profile. The profile uses schema version 2; any other
-version is rejected.
+removes the profile. The profile uses schema version 2; canonical version-1
+profiles remain readable without a rewrite and default to both paths enabled.
 The optional `spoof_vending_build` boolean defaults to false and is omitted
 from canonical JSON when false. Profiles without this option leave Play Store
 spoofing disabled.
@@ -349,17 +369,29 @@ named `:...` child process) is specialized by the Zygisk Next loader. During
 pre-app specialization, when native spoofing is enabled for GMS, the payload warms up
 bionic's lazily opened property areas before inspecting their mappings. It
 attempts validated process-private property-area replacement; shared property
-files and other processes are not modified. If that path cannot represent the
-profile or safely install, it restores any replaced mappings and uses the
-existing property hooks. On AArch64 the callback hook is attempted only after
-validating the wrapper semantics, memory mappings, and BTI/MTE permissions. A rejected
+files and other processes are not modified. Read-only values of 92 bytes or
+more use bionic's long-property layout within the existing profile limit of
+126 bytes. Storage is reused or allocated within the private mapping, retaining
+property addresses. Installation verifies full callback values, names, serial
+metadata, legacy API results, and mapping identity. Legacy APIs with a 92-byte
+buffer return bionic's standard long-property message; callers must use
+`__system_property_read_callback` to obtain the complete value. The hook
+fallback uses the same legacy representation and resolves the full property
+name even when the legacy caller omits its name buffer or receives a truncated
+name. The fallback preserves bionic's serial change token; only the private-area
+path changes the stored property metadata. If the private mapping lacks
+space, has an unsupported layout, or fails installation or readback, the payload
+restores any replaced mappings and uses the existing property hooks.
+On AArch64 the callback hook is attempted only after validating the wrapper
+semantics, memory mappings, and BTI/MTE permissions. A rejected
 callback hook leaves libc unchanged, records the reason, and continues with
 the available PLT and Java paths. After specialization the payload updates Java
 `Build` fields and the integer launch SDK only when GMS Build spoofing is enabled,
-and records a property probe when GMS native spoofing is enabled. Store processes
-are separated before native hook installation and receive only the optional
-Java Build string overrides. A process with no enabled spoofing path unloads
-the PIF library. OMK retains its own Google-process scope and
+and probes 14 core identity and launch-API properties through the callback API
+when GMS native spoofing is enabled, logging mismatches and missing properties.
+Store processes are separated before native hook installation and receive
+only the optional Java Build strings and derived type flags. A process with
+no enabled spoofing path unloads the PIF library. OMK retains its own Google-process scope and
 does not include upstream provider/signature spoofing or ADB/USB overrides.
 The WebUI shows the selected fingerprint, patch date, initial API level, and
 saved options. Its desktop development preview uses labelled in-memory sample
@@ -372,53 +404,238 @@ process refresh. The spoof is process-local: it does not call `resetprop`,
 change global Android properties, or change values under OMK's `[device]`
 section.
 
-**Tencent Soter compatibility (Beta)** is an optional simulation based on
-D-soter. Its switch is disabled by default and is independent of `scoop` and all
-KeyMint routing and key storage. Applying the switch atomically stores
+**Fix Tencent Soter Server (Testing)** is an optional software test implementation
+of the D-soter Binder reply contract. Its switch is disabled by default and is
+independent of PIF, `scoop`,
+and all KeyMint routing and key storage. Applying the switch atomically stores
 one strict `0` or `1` byte in
 `/data/misc/keystore/omk/data/soter_beta.conf`. Opening or cancelling the dialog
 does not write this file. The native commands are `--webui-get-soter-beta` and
 `--webui-set-soter-beta 0|1`; both run as short-lived root helpers without
 starting the daemon. Read failures are reported to the WebUI, and the payload
-does not enable the experiment when configuration cannot be validated. The simulated reply exports
-independent RSA-2048 public keys for each caller's ASK and each exact UTF-16 AuthKey
-alias. Android's RSA provider generates the key pairs in memory. The reference ATTK
-signs ASK exports, and the caller's ASK signs its AuthKey exports with RSASSA-PSS
-(SHA-256, MGF1-SHA256, salt length 20). The exported JSON contains the subject public
-key, counter `1`, a `cpu_id` derived from the unit serial, and the actual Binder caller
-UID; the UID supplied as an AIDL argument does not select another caller's keys.
-A unit without a readable serial mints a per-process identifier.
+does not enable the experiment when configuration cannot be validated. Tencent
+Soter Beta, per-app remote Soter and global Qualcomm Soter HAL takeover are
+mutually exclusive; disable the active service before enabling another mode.
+Install and enable Zygisk Next separately. Changing this switch terminates
+existing exact-name `com.tencent.soter.soterserver` processes after saving, so
+Android can rebind with the selected mode. No device reboot, package force-stop
+or key deletion is performed. If a process cannot be terminated, the helper
+reports that the preference was saved but service refresh failed; restart the
+service before relying on the new mode. Compatibility is not verified.
 
-Keys and their signed export blobs live only in the SoterServer process. Queries
-and exports report missing keys until creation succeeds. Removing an AuthKey affects
-only that caller's exact alias. Recreating an ASK clears that caller's AuthKeys, and
-`removeAllAuthKey` removes both ASK and AuthKeys for the caller. Generation or signing
-failure reports failure and preserves existing keys. Exports remain stable until a
-key is replaced or removed; a process restart discards all simulated keys.
+**Per-app remote Soter** uses the existing Soter panel and the application
+settings sheet in **Add package names**. Enable **Take over SOTER for selected
+apps** and **Enable remote Soter relay**, save the relay settings, then enable
+**Take over remote SOTER** separately for each intended application. An entry is
+an exact `package@Android-user` target. Ordinary OMK target selection,
+recommendations and automatic package addition do not opt an app into Soter.
+All switches default to off; saving an app selection does not enable a master
+switch. Remote KeyMint, Keybox forwarding and PathMask are not included.
 
-The 13 upstream reply contracts are implemented: ASK and auth-key creation, export, existence
-and removal; signing sessions and signature results; device ID, version, and extra parameters.
-`finishSign` keeps the reference shape and answers with a fixed zero buffer, because no session
-state is kept between `initSigh` and `finishSign`.
+The Rust Zygisk hook requires Zygisk Next and the Tencent SoterServer AIDL
+service. It routes only opted-in callers at the SoterServer entry point using
+the kernel Binder caller UID. Unselected transactions retain their original
+target, cookie and payload. Version and biometric-capability queries retain
+the native implementation. The Qualcomm HAL is not stopped or replaced in
+per-app mode; global HAL takeover remains a separate compatibility mode.
+Switching from global takeover requires confirmation that the software HAL
+has stopped and the stock HAL is running before per-app mode is published.
+Changing the global or per-app master mode then refreshes SoterServer so a
+running host cannot retain the previously selected injection mode. Ordinary
+relay-parameter and app-selection saves do not restart the host.
 
-Android 12-17 retain the platform's standard AIDL interface-header check. The handler
-reads UID and AuthKey alias arguments at the cursor left by that check, without
-assuming a fixed header size. Required aliases must be nonempty, terminated UTF-16
-strings; embedded NULs and exact UTF-16 code units remain part of the alias. Malformed
-required arguments fail the transaction. Trailing OEM fields do not change key
-identity. Nonstandard headerless requests are unsupported.
+App selections share the existing protected `remote.conf` as `app_enabled`
+and a JSON-array `app_targets` field. The native delta command
+`--webui-set-soter-app-target-base64` changes one exact target without changing
+relay settings or restarting services. Configuration writes serialize on the
+existing directory; saving an older relay dialog retains newer app selections.
+The root Zygisk companion rereads policy and Android's package table for each
+request. Shared UIDs, isolated UIDs and unresolved packages are not opted in.
+Credentials and network requests stay in that companion, not in the injected
+app process; private inherited channels create no persistent socket or UID file.
 
-Diagnostics use the `OhMyKeymint-Soter` logcat tag. Loading, disabled state, companion failures
-and hook installation are logged separately. Each method logs its first intercepted request and
-first delivered simulated reply, or first reply failure, per process. Arguments, key data,
-challenges and the unit serial are never logged. To inspect an affected device after rebooting
-and invoking its Soter client, run `adb logcat -d -s OhMyKeymint-Soter:I`. An installation message
-alone does not establish that requests reached the handler.
+The Tencent SDK's default UID argument `0` is not caller identity. Remote key
+slots are chosen from the authenticated caller UID, followed by the explicit
+UID mapping, rather than granting authority to an arbitrary request argument.
+Signing sessions are bounded, expire and are bound to the caller and relay
+configuration. Remote failures do not fall back to local fixture keys or
+successful native replies. The remote device's TEE and biometric checks remain
+authoritative; this feature does not manufacture fingerprint authentication.
+An already-running SoterServer must first load the updated Zygisk library.
+If its companion channel is lost, restart SoterServer to apply new selections;
+previously selected calls fail rather than silently changing key backends.
 
-The replies are generated by software and are not authentic TEE keys, payment repairs, or Play
-Integrity verdicts. Saving a switch confirms only that the preference was saved, not that device
-compatibility was verified. The feature is experimental; no supported-OS-wide validation is
-implied. Disabling and rebooting restores the unmodified Soter process path.
+**Global Soter HAL compatibility mode** is a separate Qualcomm integration for
+`vendor.qti.hardware.soter.ISoter/default`. Its WebUI panel exposes independent
+switches for enabling the software TA and its remote Soter relay. Enabling the
+software TA takes over the vendor HAL. With the relay disabled, supported
+operations use the local ledger; with the relay enabled, they use the configured
+server. The panel also exposes editable relay URL, B device
+ID, token, and optional UID mapping fields, plus a switch to accept self-signed
+TLS certificates. Existing nonempty relay identity values are preserved; empty
+URL, B device ID, or token fields are filled with their built-in defaults when
+saved. Both switches are disabled by default, TLS certificate validation
+remains enabled unless explicitly disabled, and the default UID map is empty.
+Opening or cancelling the panel does not write configuration. The software TA
+cannot be enabled while Tencent Soter Beta is enabled. Relay preferences and
+parameters can be saved while the software TA is disabled, including while
+Tencent Soter Beta is enabled; saving these preferences does not take over the
+vendor HAL. An enabled relay requires a valid HTTP or HTTPS URL, device ID, and
+token even when the software TA is disabled.
+
+Saving atomically writes the relay fields to
+`/data/misc/keystore/omk/data/soterta/remote.conf` with mode `0600`, using the
+`remote_enabled=` key. The independent software TA flag is stored in
+`/data/misc/keystore/omk/data/soterta/enabled`. Built-in credentials are part of
+the module and are not secret storage; custom saved configuration is device-local.
+When both switches are enabled, supported operations use the configured relay;
+relay failures return the stock dead-TA reply and never fall back to local
+material. A relay response requesting `local_only` is also a failure, not
+permission to switch the slot to another key identity. The relay does not cache
+ASK/AuthKey read results, so deletion and regeneration are visible immediately.
+For requests carrying an application UID, it reads Android's existing
+`/data/system/packages.list` and sends a uniquely resolved package as
+`caller_pkg` with `caller_pkg_src=arg`. This is an untrusted request-argument
+hint, not authenticated Binder identity. Resolution uses the source UID before
+relay UID mapping; profiles share the Android app-ID mapping. Missing tables,
+unknown packages, system/isolated UIDs and ambiguous shared UIDs omit the hint.
+It creates no persistent package table and does not infer a package from the
+foreground application or a key alias.
+Disabling only the relay keeps the software TA active with its local
+ledger. Disabling the software TA restores the stock HAL and retains the relay
+preferences. The service is independent
+of KeyMint routing, and saved settings
+survive reboot. Saving through the native bridge also asks the installed
+`soterta.sh` watchdog to converge immediately; its normal service loop continues
+to publish takeover status in `status.json`.
+After each new software TA instance successfully takes over the service name,
+the watchdog terminates existing `com.tencent.soter.soterserver` processes so
+Android clients can reconnect without a stale HAL proxy. Ordinary watchdog
+polls do not restart the host. This does not force-stop WeChat, delete its
+preferences, clear Soter keys, or reboot the device.
+The WebUI sends configuration as one bounded Base64-encoded UTF-8 JSON argument
+to `--webui-set-soter-hal-base64`, then reads `--webui-get-soter-hal` and checks
+every field before reporting a successful save. The raw JSON command
+`--webui-set-soter-hal` remains available for correctly quoted direct CLI calls.
+
+**Clear GMS cache** is a one-shot action, not a persistent switch. The root
+helper `--webui-clear-gms-cache` removes only the contents of `cache` and
+`code_cache` for `com.google.android.gms` and `com.android.vending` under
+`/data/user/<user>` and `/data/user_de/<user>`. It preserves the directories and
+their metadata, databases, preferences, accounts, files and other app data.
+Only Android's explicit `/data/user/0` to `/data/data` alias is accepted;
+app/cache directory symlinks cannot redirect deletion outside the selected
+cache. External-storage caches and other applications are not cleared.
+The helper then executes `killall -v com.google.android.gms.unstable` and
+`killall -v com.android.vending`, including after a partial cleanup failure.
+Absent processes are not an error; Android may restart stopped processes.
+The WebUI reports partial failures rather than claiming successful cleanup.
+It never invokes `pm clear` or resets Google app data. No new persistent
+configuration, backup or log file is created by this action.
+
+**Fix RKP** is an explicitly confirmed vendor provisioning action, not an
+OMK RKP-service replacement. `--webui-repair-rkp --confirm-persistent-write`
+requires root and runs only the device's root-owned, executable
+`/vendor/bin/KmInstallKeybox` with the fixed placeholder arguments
+`Keybox_file Device_ID true rkp`. `LD_LIBRARY_PATH` is set to
+`/vendor/lib64:/vendor/lib64/hw` for that child only. No real Keybox is supplied,
+no tool is downloaded or bundled, and permissions are not changed.
+The vendor tool may write persist/TEE provisioning state; its behavior varies
+by device, and rollback is not guaranteed even after an error or timeout.
+The WebUI therefore requires a separate risk confirmation for every execution.
+Execution is bounded to 120 seconds and 16 KiB of output, with no automatic
+retry. Only a successful exit with an upstream completion marker is reported
+as tool completion. This does not verify Google certificate provisioning,
+factory diagnostics, hardware attestation or fingerprint payment. Do not use
+it on a healthy device or repeat it blindly. Browser previews execute neither
+maintenance action.
+
+The `soterta-svc` Binder entry point, request parsing, reply encoding and relay
+logic are implemented in Rust. It accepts both the standard 14-method and
+compact 11-method Soter transaction layouts. Each request is resolved from its
+complete argument payload, with bounded strings and no shared first-call layout
+guess. Payloads that do not fully match a supported operation are rejected before
+dispatch. A truncated request that is itself a complete valid request under the
+other layout is indistinguishable at this boundary. Standard Parcelable replies
+are the default; only a Binder caller whose process basename is exactly
+`cryptoeng` receives the native buffer layout. This process-name check selects
+serialization only, not authorization. Interface version and hash replies retain
+the vendor contract. Dead and log modes do not create local state.
+With the local biometric gate enabled, an unreadable or timed-out fingerprint
+counter or boot clock refuses signing with `-26`; only explicit `--bio-gate=off`
+disables this evidence requirement. This userspace counter is not TEE-backed
+biometric authentication. Remote operations retain the B-side TEE's checks.
+
+Repeated remote ASK generation returning `-5` is treated as successful only when
+fresh `has_ask` and `export_ask` reads confirm a present key in the same mapped
+UID slot. The export must contain a complete key document, public key, matching
+UID, CPU ID, counter and RSA signature tail. These checks validate structure,
+not hardware provenance or signature trust. Failed confirmation preserves the
+original `-5`. The request and its confirmations share a 20-second budget;
+HTTP redirects are not followed. No key is deleted or regenerated by this
+confirmation path.
+
+The relay forwards Soter only, not Keybox or KeyMint data.
+
+For both Zygisk Soter modes, the entry point selects only the exact
+`com.tencent.soter.soterserver` process. A supplied nonempty app data directory
+must belong to that package; loaders which omit it are supported. The separate
+Rust handler intercepts both Binder transaction and security-context transaction
+commands. It matches codes 1 through 13 and the UTF-16
+`com.tencent.soter.soterserver.ISoterService` descriptor, following D-soter.
+The handler parses the required UID, alias, challenge and session arguments
+using bounded Parcel reads. Software test mode permits unused OEM trailing
+fields; remote mode requires the supported complete request layout. Driver
+buffer and request sizes remain bounded to 1 MiB. Matching selected requests go to a
+local Binder stub; unrecognized transactions remain unchanged. Other processes,
+including Google Play and KeyMint, do not install this handler.
+
+Zygisk registers the native hook before specialization. The local Binder stub
+is created and interception is activated after specialization, once Android
+has established the app's identity and file-descriptor state.
+
+Android 13 and newer use the NDK legacy-interface option to let the Rust
+handler match the descriptor independently of the Parcel header layout.
+Android 12/12L retain the platform's standard AIDL interface-header check;
+nonstandard headerless requests are not supported on those versions.
+All 13 upstream reply contracts are implemented: ASK and auth-key creation,
+export, existence and removal; signing sessions and signature results; device
+ID, version, and extra parameters. ASK and auth-key presence are maintained
+per UID and alias in process memory. Removing a key changes subsequent
+existence and export results. Key presence, counters and sessions reset when
+Tencent SoterServer restarts; this feature creates no persistent key storage.
+
+The RSA-2048 key is the publicly available RustCrypto `rsa` 0.9.10 test fixture,
+not a device key or a secret. Its matching public key is derived from that
+fixture. The fixed test CPU ID is the 16-byte ASCII value `OMK-SOFT-TEST-01`,
+represented as `4f4d4b2d534f46542d544553542d3031` in exported JSON. Key exports
+use the shared length-prefixed JSON codec and an RSA-PSS/SHA-256 signature with
+a 20-byte salt. Signatures are generated over each exported JSON body, including
+the requested UID, a positive monotonically increasing per-UID counter, and
+the auth-key alias where applicable. Exports identify this implementation with
+`software_test: true` and `key_source: "public_test_fixture"`.
+
+Signing sessions have distinct IDs and use a bounded in-memory table. No
+fingerprint capability is provided: `finishSign` returns `-26` and empty data
+for an available session, or `-1000` for an unknown or consumed session. Extra
+fingerprint parameters return a present parcelable with a null value rather
+than a fabricated sensor type or position.
+
+Diagnostics use the `OhMyKeymint-Soter` logcat tag. Loading, disabled state,
+companion failures and hook installation are logged separately. Each method
+logs its first intercepted request and first delivered simulated reply, or
+first reply failure, per process. Arguments, key data and challenges are not
+logged. To inspect an affected device after rebooting and invoking its Soter
+client, run `adb logcat -d -s OhMyKeymint-Soter:I`. An installation message alone
+does not establish that requests reached the handler.
+
+The exported signatures are valid only under the publicly known software test
+key. They do not establish hardware key provenance, authorize fingerprints,
+repair payments, or supply Play Integrity verdicts. Real TEE, KeyMint and
+vendor HAL paths remain unchanged. Saving a switch confirms only that the
+preference was saved, not that device compatibility was verified. The feature
+is experimental; no supported-OS-wide validation is implied. Disabling and
+rebooting restores the unmodified Soter process path.
 
 All other WebUI assets are bundled and no network request is made for normal
 local operations. None of the WebUI network paths requires a device-provided
@@ -1045,12 +1262,33 @@ labels, partial names, and wildcards are not accepted. TrickyStore's `!`
 generate suffix is not interpreted. Invalid selectors reject the configuration;
 a failed reload keeps the previous valid settings active.
 
-The embedded WebUI presents installed packages with their Android user and
-saves user-specific selections through the native helper described above. A WebUI save replaces only the
-normalized `scoop` list; `[main]`, `[filter]`, `[intercept]`, and preserved
-per-package tables retain their current values. Opening the package selector,
-returning to it from another app, or using its refresh action reloads installed
-packages without discarding selections that have not yet been saved.
+The embedded WebUI presents an icon, application name, package name, and
+selection control for each installed package. Multiple Android users have
+separate groups and user-specific selections. A WebUI save merges only the
+user's additions and removals into the current normalized `scoop` list;
+`[main]`, `[filter]`, `[intercept]`, and per-package tables retain their current
+values. Opening the package selector, returning to it from another app,
+pulling down at the top, or using its refresh action reloads installed packages
+and saved selections without discarding unsaved edits. Pull-to-refresh uses an
+elastic capsule indicator and a release threshold. Existing rows and loaded
+icons remain visible while refreshing; a full loading view is used only before
+the first package snapshot is available.
+The gesture is coalesced to animation frames and moves the list with compositor
+transforms, without resizing the list layout on each touch event. Refresh state
+is painted before configuration and package-manager bridge queries begin.
+
+**Automatically add new apps** is disabled by default and saves immediately.
+Enabling it records a baseline of installed user applications without selecting
+them. While enabled, OMK checks for new user applications in the background,
+including when the WebUI is closed, and adds user-specific `package@user_id`
+targets. System applications are excluded. App updates and unchanged installed
+apps do not re-add a manually deselected target. Disabling the option leaves
+existing selections unchanged; enabling it again records a fresh baseline.
+The switch and per-user package snapshots are stored in
+`/data/misc/keystore/omk/data/auto_targets.json`. An unreadable user profile keeps
+its previous snapshot; a newly discovered profile is baselined on its first
+successful scan. The background worker checks at approximately one-minute
+intervals and on relevant package-list changes, so detection is not immediate.
 
 Android can assign several packages the same identity. In that case, listing
 any one of those packages allows the shared identity, unless a filter rule
@@ -1313,8 +1551,8 @@ until the file is corrected.
 The embedded WebUI can change `scoop`, install a locally selected keybox,
 synchronize the four `[trust]` patch-level fields from the official Android
 Security Bulletin, restore those fields to `"auto"`, manage the validated PIF
-profile, and enable the optional Tencent Soter compatibility (Beta) simulation.
-Security-patch sync and restore also manage
+profile, and configure the Qualcomm Soter HAL relay used by the WeChat payment
+fingerprint path. Security-patch sync and restore also manage
 the two global runtime properties and the defaults snapshot described above.
 Persistent native save paths validate the complete candidate before writing and
 use atomic replacement. Successful saves enter the applicable watcher hot-reload

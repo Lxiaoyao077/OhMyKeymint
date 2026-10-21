@@ -140,6 +140,7 @@ pub fn get_keystore_service() -> anyhow::Result<rsbinder::Strong<dyn IKeystoreSe
 }
 
 pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
+    debug!("event=aaid_resolve uid={uid}");
     let application_id = if (uid == 0) || (uid == 1000) {
         let info = KeyAttestationPackageInfo {
             packageName: "AndroidSystem".to_string(),
@@ -153,10 +154,8 @@ pub fn get_aaid(uid: u32) -> anyhow::Result<Vec<u8>> {
         get_application_id_from_provider(uid)?
     };
 
-    // The calling uid is the subject of this diagnostic, not a credential: AAID
-    // resolves per caller, so a failure report without it cannot name the app.
     // The generated Binder Debug implementation includes every signing
-    // certificate byte, so log only counts and never that payload.
+    // certificate byte. Log only counts, never that application-id payload.
     debug!(
         "event=aaid_resolved uid={uid} package_count={} signature_count={}",
         application_id.packageInfos.len(),

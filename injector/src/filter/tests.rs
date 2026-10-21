@@ -155,7 +155,7 @@ fn package_user_target_matches_only_the_current_caller_user() {
             uid,
             PackageResolution::Known(vec!["com.allowed".to_string()]),
         );
-        assert_eq!(decision.allowed, allowed, "unexpected decision for the caller");
+        assert_eq!(decision.allowed, allowed, "caller uid={uid}");
     }
     for uid in [10_123, 1_010_123] {
         assert!(
