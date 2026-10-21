@@ -141,11 +141,13 @@ jobs:
 
           jq -r '.body // ""' "$SOURCE_RELEASE_JSON" > changelog.md
 
+          changelog_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/changelog/changelog.md"
+
           jq -n \
             --arg version "$TAG_NAME" \
             --argjson versionCode "$VERSION_CODE" \
             --arg zipUrl "$RELEASE_ZIP_URL" \
-            --arg changelog "https://raw.githubusercontent.com/ITxiao6666/OhMyKeymint/changelog/changelog.md" \
+            --arg changelog "$changelog_url" \
             '{
               version: $version,
               versionCode: $versionCode,
